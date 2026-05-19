@@ -27,8 +27,8 @@ if submitted:
     payload = {
         "origin_city": origin_city,
         "date_range": date_range,
-        "trip_length": trip_length,
-        "budget": budget,
+        "trip_length": int(trip_length),
+        "budget": int(budget),
         "interests": interests,
         "transport_preference": transport_preference,
         "physical_level": physical_level,
@@ -39,6 +39,38 @@ if submitted:
         response.raise_for_status()
     except requests.RequestException as error:
         st.error(f"Could not reach the backend: {error}")
-    else:
-        st.subheader("Trip plan")
-        st.json(response.json())
+        st.stop()
+
+    plan = response.json()
+
+    # ── Recommendation ──────────────────────────────────────────────────────
+    st.success(plan["final_recommendation"])
+
+    # ── Ranked destinations ──────────────────────────────────────────────────
+    st.subheader("Top 3 destinations")
+
+    for dest in plan["ranked_destinations"]:
+        with st.container(border=True):
+            col_name, col_score, col_cost = st.columns([3, 1, 1])
+            col_name.markdown(f"### {dest['name']}, {dest['country']}")
+            col_score.metric("Score", dest["score"])
+            col_cost.metric("Est. cost", f"€{dest['estimated_cost']}")
+
+            col_pros, col_cons = st.columns(2)
+            col_pros.markdown("**Pros**\n" + "\n".join(f"- {p}" for p in dest["pros"]))
+            col_cons.markdown("**Cons**\n" + "\n".join(f"- {c}" for c in dest["cons"]))
+
+    # ── Itinerary ────────────────────────────────────────────────────────────
+    st.subheader("Itinerary")
+
+    for day in plan["itinerary"]:
+        st.markdown(f"**Day {day['day']} — {day['destination']}**  \n{day['plan']}")
+
+    # ── Risks ────────────────────────────────────────────────────────────────
+    st.subheader("Risks & caveats")
+    for risk in plan["risks"]:
+        st.warning(risk, icon="⚠️")
+
+    # ── Raw JSON for debugging ───────────────────────────────────────────────
+    with st.expander("Raw API response (debug)"):
+        st.json(plan)
