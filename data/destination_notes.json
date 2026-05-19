@@ -1,0 +1,43 @@
+[
+  {
+    "name": "Lisbon",
+    "country": "Portugal",
+    "interests": ["food", "history", "architecture", "nightlife"],
+    "transport_options": ["flight", "train"],
+    "physical_level": "medium",
+    "estimated_cost": 650,
+    "pros": ["Great food scene", "Historic neighborhoods", "Good value for money"],
+    "cons": ["Hilly streets", "Can be crowded in peak season"]
+  },
+  {
+    "name": "Prague",
+    "country": "Czechia",
+    "interests": ["history", "architecture", "nightlife"],
+    "transport_options": ["train", "bus", "flight"],
+    "physical_level": "low",
+    "estimated_cost": 520,
+    "pros": ["Compact old town", "Strong train connections", "Affordable lodging"],
+    "cons": ["Very popular tourist center", "Some nightlife areas are noisy"]
+  },
+  {
+    "name": "Ljubljana",
+    "country": "Slovenia",
+    "interests": ["nature", "food", "architecture"],
+    "transport_options": ["train", "bus"],
+    "physical_level": "medium",
+    "estimated_cost": 580,
+    "pros": ["Relaxed city center", "Easy access to nature", "Walkable scale"],
+    "cons": ["Fewer direct connections", "Smaller museum scene"]
+  },
+  {
+    "name": "Amsterdam",
+    "country": "Netherlands",
+    "interests": ["art", "architecture", "nightlife"],
+    "transport_options": ["train", "flight", "bus"],
+    "physical_level": "low",
+    "estimated_cost": 850,
+    "pros": ["Excellent museums", "Easy local transport", "Beautiful canals"],
+    "cons": ["Higher accommodation costs", "Busy central areas"]
+  }
+]
+

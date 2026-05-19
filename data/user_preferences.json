@@ -1,0 +1,10 @@
+{
+  "origin_city": "Munich",
+  "date_range": "June 10-15",
+  "trip_length": 4,
+  "budget": 700,
+  "interests": ["food", "history"],
+  "transport_preference": "train",
+  "physical_level": "medium"
+}
+
