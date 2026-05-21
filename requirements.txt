@@ -1,0 +1,8 @@
+fastapi==0.136.1
+uvicorn==0.47.0
+streamlit==1.57.0
+requests==2.34.2
+pytest==9.0.3
+python-dotenv==1.2.2
+# Optional — only needed when ANTHROPIC_API_KEY is set
+anthropic==0.104.0

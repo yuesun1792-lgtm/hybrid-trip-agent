@@ -11,6 +11,14 @@ class TripRequest(BaseModel):
     physical_level: str
 
 
+class ToolInsight(BaseModel):
+    transport_hours: float
+    transport_mode: str
+    weather_risk: str   # "low" | "medium" | "high"
+    weather_note: str
+    estimated_total_cost: int
+
+
 class DestinationSuggestion(BaseModel):
     name: str
     country: str
@@ -18,6 +26,7 @@ class DestinationSuggestion(BaseModel):
     pros: list[str]
     cons: list[str]
     estimated_cost: int
+    tool_signals: ToolInsight | None = None
 
 
 class ItineraryDay(BaseModel):
