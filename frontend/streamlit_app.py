@@ -46,6 +46,10 @@ if submitted:
     # ── Recommendation ──────────────────────────────────────────────────────
     st.success(plan["final_recommendation"])
 
+    # ── LLM explanation (present only when ANTHROPIC_API_KEY is configured) ─
+    if plan.get("explanation"):
+        st.info(plan["explanation"])
+
     # ── Ranked destinations ──────────────────────────────────────────────────
     st.subheader("Top 3 destinations")
 

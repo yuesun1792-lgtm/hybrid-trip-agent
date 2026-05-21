@@ -1,5 +1,6 @@
 from fastapi import FastAPI
 
+from backend.app.explainer import generate_explanation
 from backend.app.models import TripPlan, TripRequest
 from backend.app.planner import create_trip_plan
 
@@ -14,5 +15,7 @@ def health_check() -> dict[str, str]:
 
 @app.post("/plan", response_model=TripPlan)
 def plan_trip(request: TripRequest) -> TripPlan:
-    return create_trip_plan(request)
+    plan = create_trip_plan(request)
+    explanation = generate_explanation(plan)
+    return plan.model_copy(update={"explanation": explanation})
 

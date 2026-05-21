@@ -31,4 +31,6 @@ class TripPlan(BaseModel):
     itinerary: list[ItineraryDay]
     risks: list[str]
     final_recommendation: str
+    # Optional LLM-generated explanation; None when no API key is configured
+    explanation: str | None = None
 
