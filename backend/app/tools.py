@@ -147,6 +147,91 @@ def estimate_total_cost(destination: str, trip_length_days: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# V2 tools: destination details + budget fit (exposed to the LLM via TOOL_SCHEMAS)
+# ---------------------------------------------------------------------------
+
+def _load_destination_notes() -> list[dict]:
+    import json
+    from backend.app.config import DESTINATION_NOTES_PATH
+    with DESTINATION_NOTES_PATH.open() as f:
+        return json.load(f)
+
+
+def get_destination_details(name: str) -> dict:
+    """Return the full destination record from destination_notes.json, or an error dict."""
+    for dest in _load_destination_notes():
+        if dest["name"].lower() == name.strip().lower():
+            return dest
+    return {"error": "unknown destination", "name": name}
+
+
+def check_budget_fit(name: str, budget: float) -> dict:
+    """Return whether the destination's estimated cost fits the budget."""
+    details = get_destination_details(name)
+    if "error" in details:
+        return details
+    estimated_cost = details["estimated_cost"]
+    return {
+        "name": details["name"],
+        "estimated_cost": estimated_cost,
+        "budget": budget,
+        "fits": estimated_cost <= budget,
+        "delta": budget - estimated_cost,
+    }
+
+
+TOOL_SCHEMAS = [
+    {
+        "name": "get_destination_details",
+        "description": (
+            "Look up full details for a European destination: description, estimated cost, "
+            "interests, transport options, physical level, pros, and cons."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The destination name, e.g. 'Lisbon' or 'Prague'.",
+                }
+            },
+            "required": ["name"],
+        },
+    },
+    {
+        "name": "check_budget_fit",
+        "description": (
+            "Check whether a destination's estimated cost fits within the traveller's budget. "
+            "Returns fits (bool) and the numeric delta (positive = under budget)."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "name": {
+                    "type": "string",
+                    "description": "The destination name.",
+                },
+                "budget": {
+                    "type": "number",
+                    "description": "The traveller's total trip budget in euros.",
+                },
+            },
+            "required": ["name", "budget"],
+        },
+    },
+]
+
+
+def dispatch_tool(name: str, tool_input: dict) -> dict:
+    """Route a tool call by name to its implementation."""
+    if name == "get_destination_details":
+        return get_destination_details(**tool_input)
+    if name == "check_budget_fit":
+        return check_budget_fit(**tool_input)
+    return {"error": "unknown tool", "name": name}
+
+
+# ---------------------------------------------------------------------------
 # Aggregator
 # ---------------------------------------------------------------------------
 
