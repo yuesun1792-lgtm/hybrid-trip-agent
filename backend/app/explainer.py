@@ -1,25 +1,10 @@
-import os
-
 from backend.app.models import TripPlan
 from backend.app.prompts import FALLBACK_EXPLANATION_TEMPLATE
 
 
 def generate_explanation(plan: TripPlan) -> str:
-    """Return a natural-language explanation for the trip plan.
-
-    Delegates to the tool-use agent when ANTHROPIC_API_KEY is set.
-    Falls back to a deterministic template on missing key, missing package, or any error.
-    """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
-    if not api_key:
-        return _fallback_explanation(plan)
-
-    try:
-        import anthropic  # noqa: F401 — ensure package is available before delegating
-        from backend.app.agent import explain_with_tools
-        return explain_with_tools(plan)
-    except Exception:
-        return _fallback_explanation(plan)
+    """Return a template-based explanation. Used on the no-key fallback path."""
+    return _fallback_explanation(plan)
 
 
 def _fallback_explanation(plan: TripPlan) -> str:

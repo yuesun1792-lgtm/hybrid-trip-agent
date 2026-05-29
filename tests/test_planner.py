@@ -7,7 +7,13 @@ import pytest
 from backend.app.explainer import _fallback_explanation, generate_explanation
 from backend.app.models import ToolInsight, TripRequest
 from backend.app.planner import create_trip_plan, score_destination
-from backend.app.tools import check_budget_fit, dispatch_tool, get_destination_details
+from backend.app.tools import (
+    check_budget_fit,
+    dispatch_tool,
+    get_destination_details,
+    list_destinations,
+    score_destinations,
+)
 
 
 def _make_plan():
@@ -116,56 +122,173 @@ def test_dispatch_tool_unknown():
 
 
 # ---------------------------------------------------------------------------
-# V2: mocked tool-use loop
+# V3: list_destinations and score_destinations
 # ---------------------------------------------------------------------------
 
-def test_explain_with_tools_mocked_loop(monkeypatch):
-    """Stub the Anthropic client to emit one tool_use then end_turn; verify dispatch + return."""
+def test_list_destinations_returns_all_destinations():
+    results = list_destinations()
+    assert len(results) >= 4
+    names = [d["name"] for d in results]
+    assert "Lisbon" in names
+    assert "Prague" in names
+
+
+def test_list_destinations_entries_have_required_keys():
+    for entry in list_destinations():
+        assert "name" in entry
+        assert "country" in entry
+        assert "summary" in entry
+
+
+def test_score_destinations_returns_ranked_list():
+    request = {
+        "origin_city": "Munich",
+        "date_range": "June 10-15",
+        "trip_length": 4,
+        "budget": 700,
+        "interests": ["food", "history"],
+        "transport_preference": "train",
+        "physical_level": "medium",
+    }
+    results = score_destinations(request)
+    assert len(results) >= 4
+    scores = [r["score"] for r in results]
+    assert scores == sorted(scores, reverse=True), "Results must be ranked best-first"
+
+
+def test_score_destinations_entries_have_required_keys():
+    request = {
+        "origin_city": "Munich",
+        "date_range": "June 10-15",
+        "trip_length": 4,
+        "budget": 700,
+        "interests": ["food"],
+        "transport_preference": "train",
+        "physical_level": "medium",
+    }
+    for entry in score_destinations(request):
+        assert "name" in entry
+        assert "score" in entry
+        assert "estimated_cost" in entry
+
+
+def test_score_destinations_invalid_request_returns_error():
+    result = score_destinations({"bad_field": "x"})
+    assert len(result) == 1
+    assert "error" in result[0]
+
+
+def test_dispatch_tool_list_destinations():
+    result = dispatch_tool("list_destinations", {})
+    assert "destinations" in result
+    assert len(result["destinations"]) >= 1
+
+
+def test_dispatch_tool_score_destinations():
+    result = dispatch_tool("score_destinations", {
+        "origin_city": "Munich",
+        "date_range": "June 10-15",
+        "trip_length": 4,
+        "budget": 700,
+        "interests": ["food"],
+        "transport_preference": "train",
+        "physical_level": "medium",
+    })
+    assert "ranked" in result
+    assert len(result["ranked"]) >= 1
+
+
+# ---------------------------------------------------------------------------
+# V3: mocked create_plan loop
+# ---------------------------------------------------------------------------
+
+_VALID_SUBMIT_INPUT = {
+    "ranked_destinations": [
+        {"name": "Lisbon",    "country": "Portugal", "score": 10, "pros": ["Great food"], "cons": ["Hilly"],    "estimated_cost": 650},
+        {"name": "Prague",    "country": "Czechia",  "score":  8, "pros": ["Cheap"],      "cons": ["Touristy"], "estimated_cost": 520},
+        {"name": "Ljubljana", "country": "Slovenia", "score":  6, "pros": ["Relaxed"],    "cons": ["Small"],    "estimated_cost": 580},
+    ],
+    "itinerary": [
+        {"day": 1, "destination": "Lisbon", "plan": "Explore the old town."},
+        {"day": 2, "destination": "Lisbon", "plan": "Visit Alfama district."},
+        {"day": 3, "destination": "Lisbon", "plan": "Day trip to Sintra."},
+        {"day": 4, "destination": "Lisbon", "plan": "Free day."},
+    ],
+    "risks": ["Costs are estimates.", "Weather may vary."],
+    "final_recommendation": "Choose Lisbon for the best match.",
+    "explanation": "Lisbon suits your food and history interests within budget.",
+}
+
+
+def _make_tool_use_block(name, tool_id, input_data):
+    block = MagicMock()
+    block.type = "tool_use"
+    block.id = tool_id
+    block.name = name
+    block.input = input_data
+    return block
+
+
+def _make_response(stop_reason, blocks):
+    r = MagicMock()
+    r.stop_reason = stop_reason
+    r.content = blocks
+    return r
+
+
+def test_create_plan_mocked_loop_succeeds(monkeypatch):
+    """Stub: list_destinations → submit_trip_plan. Assert valid TripPlan returned."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
 
-    # Build mock content blocks
-    tool_use_block = MagicMock()
-    tool_use_block.type = "tool_use"
-    tool_use_block.id = "tu_1"
-    tool_use_block.name = "check_budget_fit"
-    tool_use_block.input = {"name": "Lisbon", "budget": 700}
+    list_block = _make_tool_use_block("list_destinations", "tu_1", {})
+    submit_block = _make_tool_use_block("submit_trip_plan", "tu_2", _VALID_SUBMIT_INPUT)
 
-    text_block = MagicMock()
-    text_block.type = "text"
-    text_block.text = "Lisbon is a great pick within budget!"
-
-    first_response = MagicMock()
-    first_response.stop_reason = "tool_use"
-    first_response.content = [tool_use_block]
-
-    second_response = MagicMock()
-    second_response.stop_reason = "end_turn"
-    second_response.content = [text_block]
-
-    mock_create = MagicMock(side_effect=[first_response, second_response])
+    mock_create = MagicMock(side_effect=[
+        _make_response("tool_use", [list_block]),
+        _make_response("tool_use", [submit_block]),
+    ])
     mock_client = MagicMock()
     mock_client.messages.create = mock_create
 
     import backend.app.agent as agent_module
+    request = TripRequest(
+        origin_city="Munich", date_range="June 10-15", trip_length=4,
+        budget=700, interests=["food", "history"],
+        transport_preference="train", physical_level="medium",
+    )
     with patch.object(agent_module, "anthropic") as mock_anthropic:
         mock_anthropic.Anthropic.return_value = mock_client
-        plan = _make_plan()
-        result = agent_module.explain_with_tools(plan)
+        plan = agent_module.create_plan(request)
 
-    assert result == "Lisbon is a great pick within budget!"
+    assert len(plan.ranked_destinations) == 3
+    assert plan.ranked_destinations[0].name == "Lisbon"
+    assert plan.explanation == "Lisbon suits your food and history interests within budget."
     assert mock_create.call_count == 2
 
 
-def test_generate_explanation_falls_back_on_agent_error(monkeypatch):
-    """If the agent raises, generate_explanation returns the template fallback."""
+def test_create_plan_fallback_when_no_submit(monkeypatch):
+    """Stub always returns end_turn; after nudge still end_turn → deterministic fallback."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
 
-    import backend.app.agent as agent_module
-    with patch.object(agent_module, "explain_with_tools", side_effect=RuntimeError("boom")):
-        plan = _make_plan()
-        result = generate_explanation(plan)
+    end_turn_response = _make_response("end_turn", [])
+    mock_create = MagicMock(return_value=end_turn_response)
+    mock_client = MagicMock()
+    mock_client.messages.create = mock_create
 
-    assert plan.ranked_destinations[0].name in result
+    import backend.app.agent as agent_module
+    request = TripRequest(
+        origin_city="Munich", date_range="June 10-15", trip_length=4,
+        budget=700, interests=["food", "history"],
+        transport_preference="train", physical_level="medium",
+    )
+    with patch.object(agent_module, "anthropic") as mock_anthropic:
+        mock_anthropic.Anthropic.return_value = mock_client
+        plan = agent_module.create_plan(request)
+
+    # Fallback must return a valid TripPlan from the deterministic planner
+    assert len(plan.ranked_destinations) == 3
+    assert plan.explanation is not None
+    assert plan.ranked_destinations[0].name in plan.explanation
 
 
 def test_tool_signals_influence_score_deterministically():

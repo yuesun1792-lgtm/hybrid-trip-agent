@@ -4,54 +4,52 @@
 
 A learning-oriented project that builds a travel-planning agent one version at a time.
 The goal is to understand a real agent pipeline end to end:
-user input → backend logic → LLM reasoning (now with tools) → structured output → frontend display.
+user input → an LLM that plans via tool calls → structured output → frontend display.
 
 Build the feature first, review and refine later. Each version is a self-contained,
 verifiable chunk of work — not a stream of tiny edits.
 
-## Current status: V2 in progress (V1 complete)
+## Current status: V3 in progress (V2 complete)
 
 - **V0** — rule-based planner returning ranked destinations + itinerary.
-- **V1** — optional LLM explanation layer on top of the planner, with a deterministic
-  fallback when no API key is present.
-- **V2 (in progress)** — upgrades the explanation layer into a real Claude **tool-use loop**
-  over mock data. Claude decides when to call tools; tool results feed back into its explanation.
+- **V1** — optional LLM explanation layer on top of the planner, with a deterministic fallback.
+- **V2** — Claude tool-use loop: the model decides when to call mock tools, results feed back
+  into its explanation. The deterministic planner was still the source of truth.
+- **V3 (in progress)** — **the LLM now drives the planning itself.** Through a tool-use loop it
+  selects destinations, gathers facts via tools, and emits a structured `TripPlan`. The
+  deterministic planner is demoted from "source of truth" to an optional tool plus the no-key fallback.
 
-### What exists (V1, complete)
+### The big architectural change in V3
 
-- `backend/app/explainer.py` — `generate_explanation(plan)` reads `ANTHROPIC_API_KEY`.
-  Key present → calls Claude (`claude-haiku-4-5`) for a short explanation. Key absent →
-  deterministic template fallback (no network, no crash).
-- `backend/app/prompts.py` — prompt templates + fallback string.
-- `backend/app/main.py` — `load_dotenv()` at startup, wires `generate_explanation` into `/plan`.
-- `frontend/streamlit_app.py` — shows `explanation` in a blue info box.
-- `requirements.txt`, `.env.example`.
+The old invariant "planner.py is the source of truth" is **removed.** Planning authority moves
+to the LLM. The deterministic scorer survives in two reduced roles:
 
-### What V2 adds
+1. As a **tool** (`score_destinations`) the agent may choose to call for a baseline ranking.
+2. As the **no-key fallback** — with no API key, the app runs the old deterministic planner so it
+   still works offline.
 
-- `backend/app/tools.py` — mock tool implementations (read `data/*.json`, do simple math)
-  plus the Anthropic tool JSON schemas describing them to the model.
-- `backend/app/agent.py` — hand-rolled Claude tool-use loop: call model → if `stop_reason`
-  is `tool_use`, run the tool(s), append `tool_result`, call again → repeat until `end_turn`.
-- `backend/app/explainer.py` — `generate_explanation(plan)` now delegates to
-  `agent.explain_with_tools(plan)` when a key is present; otherwise returns the template fallback.
-  The public interface and the no-key behavior are unchanged.
-- `tests/test_planner.py` (+ new tests) — unit tests for the tool functions and the loop,
-  runnable without hitting the real API.
+### How structured output works now
 
-### Invariants that must not change
+The agent loop ends on a **terminal tool**, not on `end_turn`. `submit_trip_plan(...)` has an input
+schema mirroring the `TripPlan` model; when the agent calls it, that input — validated by Pydantic —
+becomes the response. This is how a free-form tool loop yields reliable structured JSON for the frontend.
 
-- `planner.py` is the **source of truth**. Tools and the LLM only read the already-computed
-  plan and the mock data; they never alter scores or destination ranking.
-- Scoring rules are unchanged (see table below).
-- The app works with **no API key** — the template fallback is always returned, with no network call.
+### Invariants that must hold (revised)
+
+- The **response schema is unchanged** — `/plan` still returns a `TripPlan`. The Streamlit frontend
+  needs no changes.
+- **All numbers come from tools/data, never the LLM.** Costs, budget deltas, and scores are computed
+  in code; the model only orchestrates (selection, weighting, sequencing, narrative). The LLM must
+  never invent a cost or do budget arithmetic.
 - **Mock data only** — tools read `data/*.json`. No real external travel APIs.
+- **Works with no API key** — falls back to the deterministic planner + template explanation, no network.
+- **No agent frameworks** (no LangChain/LangGraph). The loop is hand-rolled Python + the Anthropic SDK.
 
 ## Constraints (current)
 
-- Tool calling is allowed in V2, but only **mock** tools backed by `data/*.json`.
-- No LangChain, LangGraph, or agent frameworks — the tool loop is hand-rolled.
-- No database — data lives in `data/*.json`.
+- Tools are mock, backed by `data/*.json`.
+- No LangChain / LangGraph / agent frameworks.
+- No database.
 - No real external travel APIs.
 - No authentication, no persistence, no async complexity.
 
@@ -61,42 +59,46 @@ verifiable chunk of work — not a stream of tiny edits.
 eurotrip-agent/
   backend/app/
     config.py      # Path constants (PROJECT_ROOT, data file paths)
-    models.py      # Pydantic request/response schemas
-    planner.py     # Core logic: score destinations, build TripPlan  (UNCHANGED)
-    tools.py       # V2: mock tool implementations + Anthropic tool schemas
-    agent.py       # V2: Claude tool-use loop
-    explainer.py   # Public entry: agent if key present, template fallback if not
-    prompts.py     # System prompt + user prompt templates + fallback string
-    main.py        # FastAPI app — loads .env, GET / and POST /plan
+    models.py      # Pydantic schemas (TripRequest, TripPlan)
+    planner.py     # Deterministic scorer — now a TOOL + no-key fallback (code unchanged)
+    tools.py       # Tool implementations + Anthropic tool schemas (incl. submit_trip_plan)
+    agent.py       # Claude tool-use loop that DRIVES planning; ends on submit_trip_plan
+    explainer.py   # Template explanation used on the no-key fallback path
+    prompts.py     # System prompt instructing the agent how to plan with tools
+    main.py        # FastAPI app — key present → agent path, key absent → deterministic path
   frontend/
-    streamlit_app.py  # Form UI → POST to backend → structured display
+    streamlit_app.py  # Form UI → POST to backend → structured display (UNCHANGED)
   data/
     destination_notes.json  # mock European destinations
     user_preferences.json   # sample request payload (not loaded by code)
   tests/
-    test_planner.py  # planner + tool + loop unit tests
+    test_planner.py  # planner + tools + agent loop unit tests
   requirements.txt
   .env.example
 ```
 
-### Request/response flow (V2)
+### Request/response flow (V3)
 
 ```
 User fills Streamlit form
   → POST /plan with TripRequest JSON
-    → planner.create_trip_plan()          ← source of truth, UNCHANGED
-      → scores each destination, returns top 3 as TripPlan
-    → explainer.generate_explanation(plan)
-      → key present → agent.explain_with_tools(plan)
-          → Claude may call get_destination_details / check_budget_fit
-          → tool results fed back into the model
-          → returns natural-language explanation
-      → key absent → template fallback
-    → returns TripPlan with explanation field
+    → key present?
+        YES → agent.create_plan(request)              ← LLM drives planning
+              loop: model calls tools
+                list_destinations / get_destination_details
+                check_budget_fit / score_destinations (optional)
+              → model calls submit_trip_plan(...)      ← terminal tool ends the loop
+              → validate input as TripPlan
+        NO  → planner.create_trip_plan(request)        ← deterministic fallback
+              + explainer template explanation
+    → returns TripPlan
   ← Streamlit displays ranked destinations, itinerary, risks, explanation
 ```
 
-## How the planner scores destinations (UNCHANGED)
+## The scoring rules (now behind a tool, not the pipeline)
+
+These rules still exist — they back the `score_destinations` tool and the no-key fallback.
+They are no longer the final word; the agent may call them, weigh them, or override them.
 
 | Rule | Points |
 |---|---|
@@ -106,26 +108,22 @@ User fills Streamlit form
 | Transport preference matches | +1 |
 | Physical level matches | +1 |
 
-Top 3 destinations by score become `ranked_destinations`.
-The itinerary repeats the top destination for every requested day (carried over, V1 simplification).
-
 ## How to run
 
 ```bash
-cp .env.example .env          # optional — app works without a key
-# edit .env and set ANTHROPIC_API_KEY=sk-ant-...
+cp .env.example .env          # add ANTHROPIC_API_KEY for the agent path
+                              # without it, the deterministic fallback runs
 
 uvicorn backend.app.main:app --reload          # backend, terminal 1
 streamlit run frontend/streamlit_app.py        # frontend, terminal 2
 .venv/bin/python -m pytest tests/ -v           # tests
 ```
 
-Running without `.env` is fine — the explanation falls back to a deterministic template.
+With no key the app still works — it runs the deterministic planner and a template explanation.
 
 ## Roadmap
 
-- **V2 (current):** mock tool calling — see `SPEC_V2.md`.
-- **V3 (next):** expand `destination_notes.json` from a handful to ~25–40 richer entries,
-  then add **RAG** over those notes to feed the explanation/recommendation. Retrieval store
-  still to be decided (simple in-memory cosine similarity vs. a lightweight library like Chroma).
-  RAG is gated on the larger dataset — there is nothing meaningful to retrieve over a handful of records.
+- **V3 (current):** agentic planning — the LLM drives the plan via tools. See `SPEC_V3.md`.
+- **V4 (next):** RAG. Expand `destination_notes.json` to ~25–40 richer entries, add a
+  `search_destination_notes` retrieval tool the agent can call. Vector store still to be decided
+  (simple in-memory cosine similarity vs. a library like Chroma).

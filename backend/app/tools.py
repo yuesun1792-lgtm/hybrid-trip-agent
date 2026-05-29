@@ -180,20 +180,60 @@ def check_budget_fit(name: str, budget: float) -> dict:
     }
 
 
+def list_destinations() -> list[dict]:
+    """Return name, country, and a one-line summary for every available destination."""
+    return [
+        {
+            "name": d["name"],
+            "country": d["country"],
+            "summary": f"{', '.join(d['interests'][:3])}; ~€{d['estimated_cost']}",
+        }
+        for d in _load_destination_notes()
+    ]
+
+
+def score_destinations(request: dict) -> list[dict]:
+    """Score all destinations using the deterministic scorer; return them ranked best-first."""
+    from backend.app.models import TripRequest
+    from backend.app.planner import load_destination_notes as _load_notes, score_destination
+
+    try:
+        trip_request = TripRequest(**request)
+    except Exception as exc:
+        return [{"error": f"invalid request: {exc}"}]
+
+    destinations = _load_notes()
+    results = [
+        {
+            "name": d["name"],
+            "country": d["country"],
+            "score": score_destination(d, trip_request),
+            "estimated_cost": d["estimated_cost"],
+            "pros": d["pros"],
+            "cons": d["cons"],
+            "interests": d["interests"],
+        }
+        for d in destinations
+    ]
+    return sorted(results, key=lambda x: x["score"], reverse=True)
+
+
 TOOL_SCHEMAS = [
+    {
+        "name": "list_destinations",
+        "description": "List all available European destinations with a brief summary of interests and cost.",
+        "input_schema": {"type": "object", "properties": {}},
+    },
     {
         "name": "get_destination_details",
         "description": (
-            "Look up full details for a European destination: description, estimated cost, "
-            "interests, transport options, physical level, pros, and cons."
+            "Get full details for a European destination: estimated cost, interests, "
+            "transport options, physical level, pros, and cons."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "The destination name, e.g. 'Lisbon' or 'Prague'.",
-                }
+                "name": {"type": "string", "description": "Destination name, e.g. 'Lisbon'."}
             },
             "required": ["name"],
         },
@@ -201,33 +241,105 @@ TOOL_SCHEMAS = [
     {
         "name": "check_budget_fit",
         "description": (
-            "Check whether a destination's estimated cost fits within the traveller's budget. "
-            "Returns fits (bool) and the numeric delta (positive = under budget)."
+            "Check whether a destination's estimated cost fits the traveller's budget. "
+            "Returns fits (bool) and delta (positive = under budget)."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "name": {
-                    "type": "string",
-                    "description": "The destination name.",
-                },
-                "budget": {
-                    "type": "number",
-                    "description": "The traveller's total trip budget in euros.",
-                },
+                "name": {"type": "string", "description": "Destination name."},
+                "budget": {"type": "number", "description": "Traveller's total budget in euros."},
             },
             "required": ["name", "budget"],
+        },
+    },
+    {
+        "name": "score_destinations",
+        "description": (
+            "Score all destinations using the rule-based scorer and return them ranked best-first. "
+            "Pass the traveller's full request so scores reflect their interests and constraints."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "origin_city":          {"type": "string"},
+                "date_range":           {"type": "string"},
+                "trip_length":          {"type": "integer"},
+                "budget":               {"type": "number"},
+                "interests":            {"type": "array", "items": {"type": "string"}},
+                "transport_preference": {"type": "string"},
+                "physical_level":       {"type": "string"},
+            },
+            "required": [
+                "origin_city", "date_range", "trip_length", "budget",
+                "interests", "transport_preference", "physical_level",
+            ],
+        },
+    },
+    {
+        "name": "submit_trip_plan",
+        "description": (
+            "Submit the final trip plan. Call this exactly once when you have gathered "
+            "enough information. This ends the planning loop and returns the plan to the user."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "ranked_destinations": {
+                    "type": "array",
+                    "description": "Exactly 3 destinations, best first.",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "name":           {"type": "string"},
+                            "country":        {"type": "string"},
+                            "score":          {"type": "integer"},
+                            "pros":           {"type": "array", "items": {"type": "string"}},
+                            "cons":           {"type": "array", "items": {"type": "string"}},
+                            "estimated_cost": {"type": "integer"},
+                        },
+                        "required": ["name", "country", "score", "pros", "cons", "estimated_cost"],
+                    },
+                },
+                "itinerary": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "day":         {"type": "integer"},
+                            "destination": {"type": "string"},
+                            "plan":        {"type": "string"},
+                        },
+                        "required": ["day", "destination", "plan"],
+                    },
+                },
+                "risks":                {"type": "array", "items": {"type": "string"}},
+                "final_recommendation": {"type": "string"},
+                "explanation":          {"type": "string", "description": "2-3 sentence explanation for the traveller."},
+            },
+            "required": [
+                "ranked_destinations", "itinerary", "risks",
+                "final_recommendation", "explanation",
+            ],
         },
     },
 ]
 
 
 def dispatch_tool(name: str, tool_input: dict) -> dict:
-    """Route a tool call by name to its implementation."""
+    """Route a tool call by name to its implementation.
+
+    submit_trip_plan is a terminal tool — the agent loop handles it directly
+    and never passes it here.
+    """
+    if name == "list_destinations":
+        return {"destinations": list_destinations()}
     if name == "get_destination_details":
         return get_destination_details(**tool_input)
     if name == "check_budget_fit":
         return check_budget_fit(**tool_input)
+    if name == "score_destinations":
+        return {"ranked": score_destinations(tool_input)}
     return {"error": "unknown tool", "name": name}
 
 

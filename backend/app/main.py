@@ -1,3 +1,5 @@
+import os
+
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
@@ -18,7 +20,14 @@ def health_check() -> dict[str, str]:
 
 @app.post("/plan", response_model=TripPlan)
 def plan_trip(request: TripRequest) -> TripPlan:
+    if os.environ.get("ANTHROPIC_API_KEY"):
+        try:
+            import anthropic  # noqa: F401 — ensure package present before importing agent
+            from backend.app.agent import create_plan
+            return create_plan(request)
+        except Exception:
+            pass  # fall through to deterministic path
+
     plan = create_trip_plan(request)
     explanation = generate_explanation(plan)
     return plan.model_copy(update={"explanation": explanation})
-
