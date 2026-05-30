@@ -7,6 +7,7 @@ import pytest
 from backend.app.explainer import _fallback_explanation, generate_explanation
 from backend.app.models import ToolInsight, TripRequest
 from backend.app.planner import create_trip_plan, score_destination
+from backend.app.currency_tool import convert_currency
 from backend.app.tools import (
     check_budget_fit,
     dispatch_tool,
@@ -119,6 +120,77 @@ def test_dispatch_tool_check_budget_fit():
 def test_dispatch_tool_unknown():
     result = dispatch_tool("fly_me_to_the_moon", {})
     assert "error" in result
+
+
+def test_dispatch_tool_convert_currency(monkeypatch):
+    """dispatch_tool routes convert_currency without making a real network call."""
+    fake_response = {"amount": 100.0, "from": "EUR", "to": "USD",
+                     "rate": 1.08, "converted": 108.0, "date": "2024-01-01"}
+
+    def fake_convert(amount, from_currency, to_currency):
+        return fake_response
+
+    monkeypatch.setattr("backend.app.currency_tool.convert_currency", fake_convert)
+    # Re-import so tools.py picks up the patched reference
+    import importlib, backend.app.tools as tools_mod
+    monkeypatch.setattr(tools_mod, "convert_currency", fake_convert)
+
+    result = dispatch_tool("convert_currency", {"amount": 100, "from_currency": "EUR", "to_currency": "USD"})
+    assert result["converted"] == 108.0
+    assert result["rate"] == 1.08
+
+
+# ---------------------------------------------------------------------------
+# convert_currency: success and failure with stubbed urlopen
+# ---------------------------------------------------------------------------
+
+def _make_urlopen_mock(payload: dict):
+    """Return a context-manager mock that yields a file-like object with json content."""
+    import io
+    fake_resp = MagicMock()
+    fake_resp.__enter__ = lambda s: s
+    fake_resp.__exit__ = MagicMock(return_value=False)
+    fake_resp.read = MagicMock(return_value=json.dumps(payload).encode())
+    # json.load calls resp.read() via the file protocol; patch at the json level instead
+    fake_resp.__iter__ = MagicMock(return_value=iter([]))
+    # urllib.request.urlopen is used as a context manager; make it return bytes via read
+    cm = MagicMock()
+    cm.__enter__ = lambda s: io.BytesIO(json.dumps(payload).encode())
+    cm.__exit__ = MagicMock(return_value=False)
+    return cm
+
+
+def test_convert_currency_success(monkeypatch):
+    """Success path: urlopen returns valid ECB payload → correct converted amount."""
+    payload = {"date": "2024-06-01", "rates": {"USD": 1.08}}
+
+    with patch("backend.app.currency_tool.urllib.request.urlopen", return_value=_make_urlopen_mock(payload)):
+        result = convert_currency(100.0, "EUR", "USD")
+
+    assert result["converted"] == 108.0
+    assert result["rate"] == 1.08
+    assert result["from"] == "EUR"
+    assert result["to"] == "USD"
+    assert "error" not in result
+
+
+def test_convert_currency_network_failure(monkeypatch):
+    """Network failure → returns error dict, does not raise."""
+    import urllib.error
+    with patch("backend.app.currency_tool.urllib.request.urlopen",
+               side_effect=urllib.error.URLError("timeout")):
+        result = convert_currency(100.0, "EUR", "GBP")
+
+    assert "error" in result
+    assert "detail" in result
+
+
+def test_convert_currency_same_currency():
+    """Same currency → returns immediately without any network call."""
+    result = convert_currency(200.0, "EUR", "EUR")
+    assert result["converted"] == 200.0
+    assert result["rate"] == 1.0
+    assert "error" not in result
 
 
 # ---------------------------------------------------------------------------
@@ -289,6 +361,144 @@ def test_create_plan_fallback_when_no_submit(monkeypatch):
     assert len(plan.ranked_destinations) == 3
     assert plan.explanation is not None
     assert plan.ranked_destinations[0].name in plan.explanation
+
+
+# ---------------------------------------------------------------------------
+# home_currency: models + agent loop
+# ---------------------------------------------------------------------------
+
+def test_trip_request_home_currency_defaults_to_cny():
+    req = TripRequest(
+        origin_city="Munich", date_range="June 10-15", trip_length=4,
+        budget=700, interests=["food"], transport_preference="train", physical_level="low",
+    )
+    assert req.home_currency == "CNY"
+
+
+def test_trip_request_home_currency_custom():
+    req = TripRequest(
+        origin_city="Munich", date_range="June 10-15", trip_length=4,
+        budget=700, interests=["food"], transport_preference="train", physical_level="low",
+        home_currency="USD",
+    )
+    assert req.home_currency == "USD"
+
+
+def test_destination_suggestion_accepts_home_currency_fields():
+    from backend.app.models import DestinationSuggestion
+    dest = DestinationSuggestion(
+        name="Lisbon", country="Portugal", score=10,
+        pros=["Food"], cons=["Hilly"], estimated_cost=650,
+        estimated_cost_home=4680.5, home_currency="CNY",
+    )
+    assert dest.estimated_cost_home == 4680.5
+    assert dest.home_currency == "CNY"
+
+
+def test_destination_suggestion_home_currency_fields_optional():
+    from backend.app.models import DestinationSuggestion
+    dest = DestinationSuggestion(
+        name="Prague", country="Czechia", score=8,
+        pros=["Cheap"], cons=["Touristy"], estimated_cost=520,
+    )
+    assert dest.estimated_cost_home is None
+    assert dest.home_currency is None
+
+
+_VALID_SUBMIT_INPUT_WITH_HOME = {
+    "ranked_destinations": [
+        {"name": "Lisbon",    "country": "Portugal", "score": 10, "pros": ["Great food"],
+         "cons": ["Hilly"],    "estimated_cost": 650,
+         "estimated_cost_home": 4225.0, "home_currency": "CNY"},
+        {"name": "Prague",    "country": "Czechia",  "score":  8, "pros": ["Cheap"],
+         "cons": ["Touristy"], "estimated_cost": 520,
+         "estimated_cost_home": 3380.0, "home_currency": "CNY"},
+        {"name": "Ljubljana", "country": "Slovenia", "score":  6, "pros": ["Relaxed"],
+         "cons": ["Small"],    "estimated_cost": 580,
+         "estimated_cost_home": 3770.0, "home_currency": "CNY"},
+    ],
+    "itinerary": [{"day": 1, "destination": "Lisbon", "plan": "Explore."}],
+    "risks": ["Costs are estimates."],
+    "final_recommendation": "Choose Lisbon.",
+    "explanation": "Lisbon is ideal within budget.",
+}
+
+
+def test_create_plan_calls_convert_currency_for_non_eur(monkeypatch):
+    """Loop: convert_currency dispatched for CNY; estimated_cost_home arrives in final plan."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
+
+    convert_block = _make_tool_use_block(
+        "convert_currency", "tu_1",
+        {"amount": 650, "from_currency": "EUR", "to_currency": "CNY"},
+    )
+    submit_block = _make_tool_use_block("submit_trip_plan", "tu_2", _VALID_SUBMIT_INPUT_WITH_HOME)
+
+    mock_create = MagicMock(side_effect=[
+        _make_response("tool_use", [convert_block]),
+        _make_response("tool_use", [submit_block]),
+    ])
+    mock_client = MagicMock()
+    mock_client.messages.create = mock_create
+
+    import backend.app.agent as agent_module
+    import backend.app.currency_tool as ct_mod
+    # Stub convert_currency so no real network call happens
+    monkeypatch.setattr(ct_mod, "convert_currency",
+                        lambda amount, from_currency, to_currency:
+                        {"amount": amount, "from": from_currency, "to": to_currency,
+                         "rate": 6.5, "converted": round(amount * 6.5, 2), "date": "2024-01-01"})
+    import backend.app.tools as tools_mod
+    monkeypatch.setattr(tools_mod, "convert_currency",
+                        lambda amount, from_currency, to_currency:
+                        {"amount": amount, "from": from_currency, "to": to_currency,
+                         "rate": 6.5, "converted": round(amount * 6.5, 2), "date": "2024-01-01"})
+
+    request = TripRequest(
+        origin_city="Munich", date_range="June 10-15", trip_length=4,
+        budget=700, interests=["food", "history"],
+        transport_preference="train", physical_level="medium",
+        home_currency="CNY",
+    )
+    with patch.object(agent_module, "anthropic") as mock_anthropic:
+        mock_anthropic.Anthropic.return_value = mock_client
+        plan = agent_module.create_plan(request)
+
+    # convert_currency was dispatched (the loop processed the tool_use block)
+    assert mock_create.call_count == 2
+    # estimated_cost_home arrived from the submit_trip_plan input (from the tool result)
+    assert plan.ranked_destinations[0].estimated_cost_home == 4225.0
+    assert plan.ranked_destinations[0].home_currency == "CNY"
+
+
+def test_no_key_fallback_returns_none_for_home_currency_fields(monkeypatch):
+    """Without API key the deterministic planner runs; home-currency fields are absent."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    req = TripRequest(
+        origin_city="Munich", date_range="June 10-15", trip_length=4,
+        budget=700, interests=["food", "history"],
+        transport_preference="train", physical_level="medium",
+        home_currency="CNY",
+    )
+    plan = create_trip_plan(req)
+    for dest in plan.ranked_destinations:
+        assert dest.estimated_cost_home is None
+        assert dest.home_currency is None
+
+
+def test_build_agent_system_prompt_eur_skips_conversion():
+    from backend.app.prompts import build_agent_system_prompt
+    prompt = build_agent_system_prompt("EUR")
+    assert "no currency conversion" in prompt
+    assert "convert_currency" not in prompt.split("convert_currency")[1] if "convert_currency" in prompt else True
+
+
+def test_build_agent_system_prompt_cny_includes_instruction():
+    from backend.app.prompts import build_agent_system_prompt
+    prompt = build_agent_system_prompt("CNY")
+    assert "CNY" in prompt
+    assert "convert_currency" in prompt
+    assert "estimated_cost_home" in prompt
 
 
 def test_tool_signals_influence_score_deterministically():

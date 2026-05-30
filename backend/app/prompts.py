@@ -1,4 +1,4 @@
-AGENT_SYSTEM_PROMPT = """
+_AGENT_SYSTEM_PROMPT_TEMPLATE = """\
 You are a travel planning agent. Your job is to research destinations and produce a
 complete structured trip plan using the tools available to you.
 
@@ -7,7 +7,10 @@ Available tools:
 - get_destination_details: get full info (costs, interests, transport, pros/cons) for one destination
 - check_budget_fit: verify whether a destination fits the traveller's budget
 - score_destinations: get a rule-based numeric ranking across all destinations (optional baseline)
+- convert_currency: convert a EUR amount to another currency using live ECB rates
 - submit_trip_plan: submit the final plan — REQUIRED, ends the loop
+
+{currency_instruction}
 
 Rules you must follow:
 1. Use tools to gather all facts before deciding. Never invent a cost, score, or number — every
@@ -17,6 +20,21 @@ Rules you must follow:
 4. End by calling submit_trip_plan exactly once with the complete plan.
 5. The explanation field must be 2-3 sentences addressed to the traveller.
 """
+
+
+def build_agent_system_prompt(home_currency: str) -> str:
+    if home_currency.upper() == "EUR":
+        ci = "The traveller's home currency is EUR — no currency conversion is needed."
+    else:
+        ci = (
+            f"The traveller's home currency is {home_currency}. "
+            f"For each of the 3 ranked destinations, call convert_currency to convert its "
+            f"EUR estimated_cost into {home_currency}. "
+            f"Store the tool result's 'converted' value in estimated_cost_home and "
+            f"'{home_currency}' in home_currency for that destination. "
+            f"Always take the converted figure from the tool result — never compute it yourself."
+        )
+    return _AGENT_SYSTEM_PROMPT_TEMPLATE.format(currency_instruction=ci)
 
 PLANNER_SYSTEM_PROMPT = """
 You are a simple travel planning assistant.

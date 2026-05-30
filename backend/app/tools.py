@@ -6,6 +6,7 @@ gather_tool_insights() calls all three and returns a ToolInsight for one destina
 """
 
 from backend.app.models import ToolInsight
+from .currency_tool import convert_currency, CONVERT_CURRENCY_SCHEMA
 
 # ---------------------------------------------------------------------------
 # Tool 1: transport time
@@ -291,12 +292,20 @@ TOOL_SCHEMAS = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name":           {"type": "string"},
-                            "country":        {"type": "string"},
-                            "score":          {"type": "integer"},
-                            "pros":           {"type": "array", "items": {"type": "string"}},
-                            "cons":           {"type": "array", "items": {"type": "string"}},
-                            "estimated_cost": {"type": "integer"},
+                            "name":                {"type": "string"},
+                            "country":             {"type": "string"},
+                            "score":               {"type": "integer"},
+                            "pros":                {"type": "array", "items": {"type": "string"}},
+                            "cons":                {"type": "array", "items": {"type": "string"}},
+                            "estimated_cost":      {"type": "integer"},
+                            "estimated_cost_home": {
+                                "type": "number",
+                                "description": "Estimated cost converted to home currency via convert_currency tool.",
+                            },
+                            "home_currency": {
+                                "type": "string",
+                                "description": "ISO code of the home currency (e.g. CNY, USD).",
+                            },
                         },
                         "required": ["name", "country", "score", "pros", "cons", "estimated_cost"],
                     },
@@ -323,6 +332,7 @@ TOOL_SCHEMAS = [
             ],
         },
     },
+    CONVERT_CURRENCY_SCHEMA,
 ]
 
 
@@ -332,6 +342,7 @@ def dispatch_tool(name: str, tool_input: dict) -> dict:
     submit_trip_plan is a terminal tool — the agent loop handles it directly
     and never passes it here.
     """
+    print(f"[tool] {name} {tool_input}", flush=True)
     if name == "list_destinations":
         return {"destinations": list_destinations()}
     if name == "get_destination_details":
@@ -340,6 +351,8 @@ def dispatch_tool(name: str, tool_input: dict) -> dict:
         return check_budget_fit(**tool_input)
     if name == "score_destinations":
         return {"ranked": score_destinations(tool_input)}
+    if name == "convert_currency":
+        return convert_currency(**tool_input)
     return {"error": "unknown tool", "name": name}
 
 

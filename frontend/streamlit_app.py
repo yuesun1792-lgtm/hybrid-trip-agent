@@ -20,6 +20,14 @@ with st.form("trip_form"):
     )
     transport_preference = st.selectbox("Transport preference", ["train", "flight", "bus"])
     physical_level = st.selectbox("Physical level", ["low", "medium", "high"])
+    home_currency = st.selectbox(
+        "Home currency",
+        options=["CNY", "USD", "EUR", "GBP", "JPY"],
+        format_func=lambda c: {"CNY": "人民币 (CNY)", "USD": "US Dollar (USD)",
+                                "EUR": "Euro (EUR)", "GBP": "Pound (GBP)",
+                                "JPY": "Yen (JPY)"}[c],
+        index=0,
+    )
 
     submitted = st.form_submit_button("Plan trip")
 
@@ -32,10 +40,11 @@ if submitted:
         "interests": interests,
         "transport_preference": transport_preference,
         "physical_level": physical_level,
+        "home_currency": home_currency,
     }
 
     try:
-        response = requests.post(API_URL, json=payload, timeout=10)
+        response = requests.post(API_URL, json=payload, timeout=60)
         response.raise_for_status()
     except requests.RequestException as error:
         st.error(f"Could not reach the backend: {error}")
@@ -55,10 +64,15 @@ if submitted:
 
     for dest in plan["ranked_destinations"]:
         with st.container(border=True):
-            col_name, col_score, col_cost = st.columns([3, 1, 1])
+            col_name, col_score, col_cost, col_home = st.columns([3, 1, 1, 1])
             col_name.markdown(f"### {dest['name']}, {dest['country']}")
             col_score.metric("Score", dest["score"])
             col_cost.metric("Est. cost", f"€{dest['estimated_cost']}")
+            if dest.get("estimated_cost_home") and dest.get("home_currency"):
+                col_home.metric(
+                    dest["home_currency"],
+                    f"{dest['estimated_cost_home']:,.0f}",
+                )
 
             col_pros, col_cons = st.columns(2)
             col_pros.markdown("**Pros**\n" + "\n".join(f"- {p}" for p in dest["pros"]))

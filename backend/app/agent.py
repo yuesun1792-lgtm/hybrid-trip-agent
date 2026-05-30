@@ -7,7 +7,7 @@ import anthropic
 from pydantic import ValidationError
 
 from backend.app.models import TripPlan, TripRequest
-from backend.app.prompts import AGENT_SYSTEM_PROMPT
+from backend.app.prompts import build_agent_system_prompt
 from backend.app.tools import TOOL_SCHEMAS, dispatch_tool
 
 _MAX_ITERATIONS = 8
@@ -58,7 +58,7 @@ def create_plan(request: TripRequest) -> TripPlan:
         response = client.messages.create(
             model="claude-haiku-4-5",
             max_tokens=2048,
-            system=AGENT_SYSTEM_PROMPT,
+            system=build_agent_system_prompt(request.home_currency),
             tools=TOOL_SCHEMAS,
             messages=messages,
         )

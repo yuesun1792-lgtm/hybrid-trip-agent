@@ -9,6 +9,7 @@ class TripRequest(BaseModel):
     interests: list[str]
     transport_preference: str
     physical_level: str
+    home_currency: str = "CNY"
 
 
 class ToolInsight(BaseModel):
@@ -27,6 +28,8 @@ class DestinationSuggestion(BaseModel):
     cons: list[str]
     estimated_cost: int
     tool_signals: ToolInsight | None = None
+    estimated_cost_home: float | None = None   # cost in traveller's home currency
+    home_currency: str | None = None           # ISO code echoed back
 
 
 class ItineraryDay(BaseModel):
