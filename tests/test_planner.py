@@ -501,6 +501,164 @@ def test_build_agent_system_prompt_cny_includes_instruction():
     assert "estimated_cost_home" in prompt
 
 
+# ---------------------------------------------------------------------------
+# V4: knowledge.py — wikitext parsing + search (no network, no model)
+# ---------------------------------------------------------------------------
+
+_FIXTURE_WIKITEXT = """\
+== Understand ==
+Lisbon is the capital of Portugal, set on the Tagus estuary. It has a mild Atlantic climate
+with over 300 days of sunshine per year, making it one of the sunniest capitals in Europe.
+
+== See ==
+The Belém Tower and Jerónimos Monastery are UNESCO World Heritage sites absolutely worth
+visiting. The historic Alfama district with its medieval castle and narrow cobblestone streets
+is also a highlight. Tram 28 offers a scenic ride through several historic neighbourhoods.
+
+== Eat ==
+Pastel de nata (custard tarts) and grilled sardines are must-try local specialties. Fresh
+seafood is abundant and affordable. The Time Out Market in Cais do Sodré brings together the
+best food stalls and restaurants from across the city under one roof. Local wine is excellent.
+
+== Stay safe ==
+Lisbon is generally safe for tourists. Pickpocketing is common on tram 28 and in Alfama.
+Avoid poorly-lit streets near the waterfront late at night. The LNB neighbourhood can be rough.
+Keep an eye on your belongings in crowded tourist areas and on public transport.
+
+== Stay healthy ==
+Tap water is safe to drink throughout the city. Pharmacies are widely available, well-stocked,
+and staff often speak English. EU health card covers basic medical care for European visitors.
+"""
+
+
+def test_parse_sections_splits_by_heading():
+    from scripts.build_index import parse_sections
+    chunks = parse_sections(_FIXTURE_WIKITEXT, "Lisbon", "https://en.wikivoyage.org/wiki/Lisbon")
+    sections = [c["metadata"]["section"] for c in chunks]
+    assert "Stay safe" in sections
+    assert "Eat" in sections
+    assert "See" in sections
+
+
+def test_parse_sections_chunk_text_contains_destination_prefix():
+    from scripts.build_index import parse_sections
+    chunks = parse_sections(_FIXTURE_WIKITEXT, "Lisbon", "https://en.wikivoyage.org/wiki/Lisbon")
+    for c in chunks:
+        assert c["text"].startswith("Lisbon —")
+
+
+def test_parse_sections_metadata_fields():
+    from scripts.build_index import parse_sections
+    chunks = parse_sections(_FIXTURE_WIKITEXT, "Lisbon", "https://en.wikivoyage.org/wiki/Lisbon")
+    for c in chunks:
+        assert "destination" in c["metadata"]
+        assert "section"     in c["metadata"]
+        assert "url"         in c["metadata"]
+        assert c["metadata"]["url"] == "https://en.wikivoyage.org/wiki/Lisbon"
+
+
+def test_parse_sections_skips_tiny_sections():
+    from scripts.build_index import parse_sections
+    tiny = "== See ==\nOK.\n== Eat ==\nGreat food here with lots of variety and detail.\n" * 1
+    chunks = parse_sections(tiny, "X", "http://x")
+    # "OK." alone is < 20 words; should be skipped
+    sections = [c["metadata"]["section"] for c in chunks]
+    assert "See" not in sections
+
+
+def test_clean_wikitext_strips_templates_and_links():
+    from scripts.build_index import clean_wikitext
+    raw = "{{listing|name=Foo}} [[Alfama|the Alfama]] area has '''great''' food."
+    result = clean_wikitext(raw)
+    assert "{{" not in result
+    assert "[[" not in result
+    assert "'''" not in result
+    assert "the Alfama" in result
+
+
+# ── Fixture index for search tests ──────────────────────────────────────────
+
+import numpy as np
+
+_FIXTURE_TEXTS = [
+    "Lisbon — Stay safe\nPickpocketing common on tram 28. Avoid waterfront late at night.",
+    "Lisbon — Eat\nPastel de nata and grilled sardines are must-try specialties.",
+    "Venice — See\nThe Grand Canal and St Mark's Basilica are iconic. Best in spring.",
+    "Venice — Stay safe\nVenice is very safe with almost no violent crime.",
+    "Prague — Eat\nTraditional svíčková and goulash are Prague staples.",
+]
+_FIXTURE_DIM = 8
+_rng = np.random.default_rng(42)
+_FIXTURE_EMBEDDINGS = _rng.random((len(_FIXTURE_TEXTS), _FIXTURE_DIM), dtype=np.float32)
+_FIXTURE_METADATA = [
+    {"destination": "Lisbon", "section": "Stay safe", "url": "https://en.wikivoyage.org/wiki/Lisbon"},
+    {"destination": "Lisbon", "section": "Eat",       "url": "https://en.wikivoyage.org/wiki/Lisbon"},
+    {"destination": "Venice", "section": "See",       "url": "https://en.wikivoyage.org/wiki/Venice"},
+    {"destination": "Venice", "section": "Stay safe", "url": "https://en.wikivoyage.org/wiki/Venice"},
+    {"destination": "Prague", "section": "Eat",       "url": "https://en.wikivoyage.org/wiki/Prague"},
+]
+
+
+def _inject_fixture_index(monkeypatch):
+    """Patch knowledge._index and _embed_query so no model or file is loaded."""
+    import backend.app.knowledge as km
+    monkeypatch.setattr(km, "_index", {
+        "embeddings": _FIXTURE_EMBEDDINGS.copy(),
+        "texts":      _FIXTURE_TEXTS[:],
+        "metadata":   _FIXTURE_METADATA[:],
+    })
+    # Query vector pointing toward index[0] (Lisbon / Stay safe)
+    query_vec = _FIXTURE_EMBEDDINGS[0].copy()
+    monkeypatch.setattr(km, "_embed_query", lambda q: query_vec)
+
+
+def test_search_travel_knowledge_returns_results(monkeypatch):
+    _inject_fixture_index(monkeypatch)
+    from backend.app.knowledge import search_travel_knowledge
+    results = search_travel_knowledge("is Lisbon safe at night")
+    assert len(results) > 0
+    assert results[0]["destination"] == "Lisbon"
+    assert results[0]["section"] == "Stay safe"
+
+
+def test_search_travel_knowledge_result_schema(monkeypatch):
+    _inject_fixture_index(monkeypatch)
+    from backend.app.knowledge import search_travel_knowledge
+    for r in search_travel_knowledge("Venice canal"):
+        assert "text"        in r
+        assert "score"       in r
+        assert "destination" in r
+        assert "section"     in r
+        assert "url"         in r
+
+
+def test_search_travel_knowledge_destination_filter(monkeypatch):
+    _inject_fixture_index(monkeypatch)
+    import backend.app.knowledge as km
+    # Point query toward Venice chunk
+    monkeypatch.setattr(km, "_embed_query",
+                        lambda q: _FIXTURE_EMBEDDINGS[2].copy())
+    from backend.app.knowledge import search_travel_knowledge
+    results = search_travel_knowledge("Venice canal", destination="Venice")
+    assert all(r["destination"] == "Venice" for r in results)
+
+
+def test_search_travel_knowledge_no_index_returns_empty(monkeypatch):
+    import backend.app.knowledge as km
+    monkeypatch.setattr(km, "_index", None)
+    monkeypatch.setattr(km, "_load_index", lambda: None)
+    from backend.app.knowledge import search_travel_knowledge
+    assert search_travel_knowledge("anything") == []
+
+
+def test_dispatch_tool_search_travel_knowledge(monkeypatch):
+    _inject_fixture_index(monkeypatch)
+    result = dispatch_tool("search_travel_knowledge", {"query": "Lisbon safe"})
+    assert "results" in result
+    assert isinstance(result["results"], list)
+    assert len(result["results"]) > 0
+
+
 def test_tool_signals_influence_score_deterministically():
     # A generic destination dict that mirrors the JSON structure
     destination = {

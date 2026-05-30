@@ -333,6 +333,34 @@ TOOL_SCHEMAS = [
         },
     },
     CONVERT_CURRENCY_SCHEMA,
+    {
+        "name": "search_travel_knowledge",
+        "description": (
+            "Search the Wikivoyage travel knowledge base for grounded facts about a destination. "
+            "Returns relevant text chunks with source attribution (destination, section, URL). "
+            "Use this to ground claims about safety, best seasons, food, activities, and local "
+            "tips in real data rather than your own memory."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to look up, e.g. 'Lisbon safety at night' or 'Venice best time to visit'.",
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "Optional: restrict results to this destination.",
+                },
+                "k": {
+                    "type": "integer",
+                    "description": "Number of chunks to return (default 5, max 10).",
+                    "default": 5,
+                },
+            },
+            "required": ["query"],
+        },
+    },
 ]
 
 
@@ -353,6 +381,9 @@ def dispatch_tool(name: str, tool_input: dict) -> dict:
         return {"ranked": score_destinations(tool_input)}
     if name == "convert_currency":
         return convert_currency(**tool_input)
+    if name == "search_travel_knowledge":
+        from backend.app.knowledge import search_travel_knowledge
+        return {"results": search_travel_knowledge(**tool_input)}
     return {"error": "unknown tool", "name": name}
 
 

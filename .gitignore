@@ -32,3 +32,4 @@ node_modules/
 
 # Logs
 *.log
+data/knowledge_index.npz

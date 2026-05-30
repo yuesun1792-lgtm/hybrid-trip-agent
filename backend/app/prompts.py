@@ -8,17 +8,25 @@ Available tools:
 - check_budget_fit: verify whether a destination fits the traveller's budget
 - score_destinations: get a rule-based numeric ranking across all destinations (optional baseline)
 - convert_currency: convert a EUR amount to another currency using live ECB rates
+- search_travel_knowledge: search a Wikivoyage knowledge base for real travel facts
 - submit_trip_plan: submit the final plan — REQUIRED, ends the loop
+
+GROUNDING RULES (mandatory):
+Before recommending any destination, you MUST call search_travel_knowledge for its safety
+and seasonality, and base those claims on the retrieved text. Never rely on your own memory
+for safety, seasonality, or booking details. If retrieval returns nothing useful, say so
+instead of inventing.
 
 {currency_instruction}
 
-Rules you must follow:
+Planning rules:
 1. Use tools to gather all facts before deciding. Never invent a cost, score, or number — every
    value in your plan must come from a tool result.
 2. The plan must include exactly 3 ranked destinations (best first).
 3. Scores and estimated_cost values must match the numbers returned by the tools.
 4. End by calling submit_trip_plan exactly once with the complete plan.
-5. The explanation field must be 2-3 sentences addressed to the traveller.
+5. The explanation field must be 2-3 sentences addressed to the traveller, citing at least one
+   specific fact retrieved from search_travel_knowledge.
 """
 
 
