@@ -10,7 +10,7 @@ from backend.app.models import TripPlan, TripRequest
 from backend.app.prompts import build_agent_system_prompt
 from backend.app.tools import TOOL_SCHEMAS, dispatch_tool
 
-_MAX_ITERATIONS = 8
+_MAX_ITERATIONS = 12
 _NUDGE = (
     "You have not submitted a plan yet. "
     "Please call submit_trip_plan now with the complete trip plan."
@@ -18,18 +18,23 @@ _NUDGE = (
 
 
 def _build_user_message(request: TripRequest) -> str:
-    return (
-        f"Plan a trip with these requirements:\n"
-        f"- Origin city: {request.origin_city}\n"
-        f"- Dates: {request.date_range}\n"
-        f"- Duration: {request.trip_length} days\n"
-        f"- Budget: €{request.budget}\n"
-        f"- Interests: {', '.join(request.interests)}\n"
-        f"- Transport preference: {request.transport_preference}\n"
-        f"- Physical level: {request.physical_level}\n\n"
-        f"Use the available tools to research destinations and then call "
-        f"submit_trip_plan with a complete plan."
+    lines = [
+        "Plan a trip with these requirements:",
+        f"- Origin city: {request.origin_city}",
+        f"- Dates: {request.date_range}",
+        f"- Duration: {request.trip_length} days",
+        f"- Budget: €{request.budget}",
+        f"- Interests: {', '.join(request.interests)}",
+        f"- Transport preference: {request.transport_preference}",
+        f"- Physical level: {request.physical_level}",
+    ]
+    if request.taste_profile:
+        lines.append(f"- Taste profile: {request.taste_profile}")
+    lines.append(
+        "\nUse the available tools to research destinations and then call "
+        "submit_trip_plan with a complete plan."
     )
+    return "\n".join(lines)
 
 
 def _deterministic_fallback(request: TripRequest) -> TripPlan:

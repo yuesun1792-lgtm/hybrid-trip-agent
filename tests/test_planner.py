@@ -107,16 +107,6 @@ def test_check_budget_fit_unknown_destination():
     assert "error" in result
 
 
-def test_dispatch_tool_get_destination_details():
-    result = dispatch_tool("get_destination_details", {"name": "Prague"})
-    assert result["name"] == "Prague"
-
-
-def test_dispatch_tool_check_budget_fit():
-    result = dispatch_tool("check_budget_fit", {"name": "Lisbon", "budget": 700})
-    assert "fits" in result
-
-
 def test_dispatch_tool_unknown():
     result = dispatch_tool("fly_me_to_the_moon", {})
     assert "error" in result
@@ -250,26 +240,6 @@ def test_score_destinations_invalid_request_returns_error():
     assert "error" in result[0]
 
 
-def test_dispatch_tool_list_destinations():
-    result = dispatch_tool("list_destinations", {})
-    assert "destinations" in result
-    assert len(result["destinations"]) >= 1
-
-
-def test_dispatch_tool_score_destinations():
-    result = dispatch_tool("score_destinations", {
-        "origin_city": "Munich",
-        "date_range": "June 10-15",
-        "trip_length": 4,
-        "budget": 700,
-        "interests": ["food"],
-        "transport_preference": "train",
-        "physical_level": "medium",
-    })
-    assert "ranked" in result
-    assert len(result["ranked"]) >= 1
-
-
 # ---------------------------------------------------------------------------
 # V3: mocked create_plan loop
 # ---------------------------------------------------------------------------
@@ -309,14 +279,16 @@ def _make_response(stop_reason, blocks):
 
 
 def test_create_plan_mocked_loop_succeeds(monkeypatch):
-    """Stub: list_destinations → submit_trip_plan. Assert valid TripPlan returned."""
+    """Stub: search_travel_knowledge → submit_trip_plan. Assert valid TripPlan returned."""
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
 
-    list_block = _make_tool_use_block("list_destinations", "tu_1", {})
+    search_block = _make_tool_use_block(
+        "search_travel_knowledge", "tu_1", {"query": "budget history food Europe"}
+    )
     submit_block = _make_tool_use_block("submit_trip_plan", "tu_2", _VALID_SUBMIT_INPUT)
 
     mock_create = MagicMock(side_effect=[
-        _make_response("tool_use", [list_block]),
+        _make_response("tool_use", [search_block]),
         _make_response("tool_use", [submit_block]),
     ])
     mock_client = MagicMock()
@@ -657,6 +629,138 @@ def test_dispatch_tool_search_travel_knowledge(monkeypatch):
     assert "results" in result
     assert isinstance(result["results"], list)
     assert len(result["results"]) > 0
+
+
+# ---------------------------------------------------------------------------
+# V5: get_destination_budget
+# ---------------------------------------------------------------------------
+
+def test_get_destination_budget_known():
+    from backend.app.tools import get_destination_budget
+    result = get_destination_budget("Prague")
+    assert result["destination"] == "Prague"
+    assert result["estimated_cost_eur"] == 520
+    assert "error" not in result
+
+
+def test_get_destination_budget_unknown():
+    from backend.app.tools import get_destination_budget
+    result = get_destination_budget("Atlantis")
+    assert "error" in result
+    assert result["destination"] == "Atlantis"
+
+
+def test_get_destination_budget_covers_all_22():
+    from backend.app.tools import get_destination_budget
+    destinations = [
+        "Lisbon", "Porto", "Algarve", "Barcelona", "Seville", "Paris", "Nice",
+        "Chamonix", "Provence", "Rome", "Venice", "Florence", "Cinque Terre",
+        "Athens", "Santorini", "Prague", "Vienna", "Ljubljana", "Salzburg",
+        "Hallstatt", "Innsbruck", "Amsterdam",
+    ]
+    for dest in destinations:
+        result = get_destination_budget(dest)
+        assert "error" not in result, f"{dest} missing from destination_costs.json"
+        assert isinstance(result["estimated_cost_eur"], int)
+
+
+def test_dispatch_tool_get_destination_budget():
+    result = dispatch_tool("get_destination_budget", {"destination": "Lisbon"})
+    assert result["estimated_cost_eur"] == 650
+    assert result["destination"] == "Lisbon"
+
+
+# ---------------------------------------------------------------------------
+# V5: llm_rerank
+# ---------------------------------------------------------------------------
+
+def test_llm_rerank_reorders_by_score(monkeypatch):
+    """LLM returns high score for index 1 → index 1 moves to position 0."""
+    candidates = [
+        {"text": "Lisbon cheap", "score": 0.9, "destination": "Lisbon", "section": "Eat", "url": ""},
+        {"text": "Prague nightlife", "score": 0.8, "destination": "Prague", "section": "Do", "url": ""},
+        {"text": "Venice canal", "score": 0.7, "destination": "Venice", "section": "See", "url": ""},
+    ]
+
+    fake_content = MagicMock()
+    fake_content.text = "[3, 9, 1]"
+    fake_response = MagicMock()
+    fake_response.content = [fake_content]
+
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = fake_response
+
+    import backend.app.reranker as reranker_mod
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
+    with patch.object(reranker_mod, "anthropic") as mock_anthropic:
+        mock_anthropic.Anthropic.return_value = fake_client
+        result = reranker_mod.llm_rerank(
+            [dict(c) for c in candidates],
+            query="nightlife Europe",
+            taste_profile="love nightlife, hate crowds",
+            k=2,
+        )
+
+    assert result[0]["destination"] == "Prague"   # score 9 → first
+    assert len(result) == 2
+
+
+def test_llm_rerank_fallback_on_no_api_key(monkeypatch):
+    """Without an API key llm_rerank returns cosine-ordered slice without calling LLM."""
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    candidates = [
+        {"text": "A", "score": 0.9, "destination": "Lisbon",  "section": "Eat", "url": ""},
+        {"text": "B", "score": 0.8, "destination": "Prague",  "section": "Do",  "url": ""},
+    ]
+    from backend.app.reranker import llm_rerank
+    result = llm_rerank([dict(c) for c in candidates], "query", "profile", k=2)
+    assert result[0]["destination"] == "Lisbon"
+    assert len(result) == 2
+
+
+def test_dispatch_tool_rerank_travel_knowledge(monkeypatch):
+    """dispatch_tool routes rerank_travel_knowledge; knowledge and reranker are monkeypatched."""
+    _inject_fixture_index(monkeypatch)
+
+    import backend.app.reranker as reranker_mod
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
+
+    fake_content = MagicMock()
+    fake_content.text = "[5, 8, 3, 6, 4]"
+    fake_response = MagicMock()
+    fake_response.content = [fake_content]
+    fake_client = MagicMock()
+    fake_client.messages.create.return_value = fake_response
+    with patch.object(reranker_mod, "anthropic") as mock_anthropic:
+        mock_anthropic.Anthropic.return_value = fake_client
+        result = dispatch_tool("rerank_travel_knowledge", {
+            "query": "safe food destination",
+            "taste_profile": "love local food, hate tourist traps",
+        })
+
+    assert "results" in result
+    assert isinstance(result["results"], list)
+
+
+# ---------------------------------------------------------------------------
+# V5: taste_profile field
+# ---------------------------------------------------------------------------
+
+def test_trip_request_taste_profile_defaults_empty():
+    req = TripRequest(
+        origin_city="Munich", date_range="June 10-15", trip_length=4,
+        budget=700, interests=["food"], transport_preference="train", physical_level="low",
+    )
+    assert req.taste_profile == ""
+
+
+def test_trip_request_taste_profile_custom():
+    req = TripRequest(
+        origin_city="Munich", date_range="June 10-15", trip_length=4,
+        budget=700, interests=["food"], transport_preference="train", physical_level="low",
+        taste_profile="I love hiking and dislike tourist traps.",
+    )
+    assert req.taste_profile == "I love hiking and dislike tourist traps."
 
 
 def test_tool_signals_influence_score_deterministically():

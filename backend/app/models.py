@@ -10,6 +10,7 @@ class TripRequest(BaseModel):
     transport_preference: str
     physical_level: str
     home_currency: str = "CNY"
+    taste_profile: str = ""
 
 
 class ToolInsight(BaseModel):

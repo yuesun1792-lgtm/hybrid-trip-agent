@@ -221,60 +221,21 @@ def score_destinations(request: dict) -> list[dict]:
 
 TOOL_SCHEMAS = [
     {
-        "name": "list_destinations",
-        "description": "List all available European destinations with a brief summary of interests and cost.",
-        "input_schema": {"type": "object", "properties": {}},
-    },
-    {
-        "name": "get_destination_details",
+        "name": "get_destination_budget",
         "description": (
-            "Get full details for a European destination: estimated cost, interests, "
-            "transport options, physical level, pros, and cons."
+            "Return the estimated cost in EUR for a destination. "
+            "Always call this for each candidate destination before submitting the plan — "
+            "estimated_cost must come from this tool, never from memory."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
-                "name": {"type": "string", "description": "Destination name, e.g. 'Lisbon'."}
+                "destination": {
+                    "type": "string",
+                    "description": "Destination name, e.g. 'Lisbon' or 'Chamonix'.",
+                }
             },
-            "required": ["name"],
-        },
-    },
-    {
-        "name": "check_budget_fit",
-        "description": (
-            "Check whether a destination's estimated cost fits the traveller's budget. "
-            "Returns fits (bool) and delta (positive = under budget)."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "name": {"type": "string", "description": "Destination name."},
-                "budget": {"type": "number", "description": "Traveller's total budget in euros."},
-            },
-            "required": ["name", "budget"],
-        },
-    },
-    {
-        "name": "score_destinations",
-        "description": (
-            "Score all destinations using the rule-based scorer and return them ranked best-first. "
-            "Pass the traveller's full request so scores reflect their interests and constraints."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "origin_city":          {"type": "string"},
-                "date_range":           {"type": "string"},
-                "trip_length":          {"type": "integer"},
-                "budget":               {"type": "number"},
-                "interests":            {"type": "array", "items": {"type": "string"}},
-                "transport_preference": {"type": "string"},
-                "physical_level":       {"type": "string"},
-            },
-            "required": [
-                "origin_city", "date_range", "trip_length", "budget",
-                "interests", "transport_preference", "physical_level",
-            ],
+            "required": ["destination"],
         },
     },
     {
@@ -292,12 +253,15 @@ TOOL_SCHEMAS = [
                     "items": {
                         "type": "object",
                         "properties": {
-                            "name":                {"type": "string"},
-                            "country":             {"type": "string"},
-                            "score":               {"type": "integer"},
-                            "pros":                {"type": "array", "items": {"type": "string"}},
-                            "cons":                {"type": "array", "items": {"type": "string"}},
-                            "estimated_cost":      {"type": "integer"},
+                            "name":           {"type": "string"},
+                            "country":        {"type": "string"},
+                            "score":          {
+                                "type": "integer",
+                                "description": "Your 0–100 assessment of how well this destination matches the traveller's interests, budget, and taste — based on retrieved knowledge.",
+                            },
+                            "pros":           {"type": "array", "items": {"type": "string"}, "description": "Grounded in retrieved knowledge."},
+                            "cons":           {"type": "array", "items": {"type": "string"}, "description": "Grounded in retrieved knowledge."},
+                            "estimated_cost": {"type": "integer", "description": "Value from get_destination_budget — do not invent."},
                             "estimated_cost_home": {
                                 "type": "number",
                                 "description": "Estimated cost converted to home currency via convert_currency tool.",
@@ -336,17 +300,17 @@ TOOL_SCHEMAS = [
     {
         "name": "search_travel_knowledge",
         "description": (
-            "Search the Wikivoyage travel knowledge base for grounded facts about a destination. "
-            "Returns relevant text chunks with source attribution (destination, section, URL). "
-            "Use this to ground claims about safety, best seasons, food, activities, and local "
-            "tips in real data rather than your own memory."
+            "Search the Wikivoyage travel knowledge base for grounded facts about destinations. "
+            "Use multiple queries with different angles (interests, season, safety, budget) to "
+            "discover which destinations to recommend. Returns relevant text chunks with source "
+            "attribution. Use when no taste_profile is set; prefer rerank_travel_knowledge otherwise."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "What to look up, e.g. 'Lisbon safety at night' or 'Venice best time to visit'.",
+                    "description": "What to look up, e.g. 'budget hiking Alps summer' or 'Venice best time to visit'.",
                 },
                 "destination": {
                     "type": "string",
@@ -361,7 +325,69 @@ TOOL_SCHEMAS = [
             "required": ["query"],
         },
     },
+    {
+        "name": "rerank_travel_knowledge",
+        "description": (
+            "Search Wikivoyage AND re-rank results using an LLM to score each chunk against "
+            "the traveller's taste profile. Use this instead of search_travel_knowledge when "
+            "taste_profile is provided — it surfaces knowledge that matches the traveller's "
+            "personal preferences, not just query similarity."
+        ),
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "query": {
+                    "type": "string",
+                    "description": "What to search for, e.g. 'food and nightlife Europe'.",
+                },
+                "taste_profile": {
+                    "type": "string",
+                    "description": "The traveller's personal preferences, copied verbatim from the trip request.",
+                },
+                "destination": {
+                    "type": "string",
+                    "description": "Optional: restrict search to this destination.",
+                },
+                "k": {
+                    "type": "integer",
+                    "description": "Number of results to return after reranking (default 5).",
+                    "default": 5,
+                },
+            },
+            "required": ["query", "taste_profile"],
+        },
+    },
 ]
+
+
+# ---------------------------------------------------------------------------
+# New V5 tool implementations
+# ---------------------------------------------------------------------------
+
+def get_destination_budget(destination: str) -> dict:
+    """Return the estimated EUR cost for a destination from destination_costs.json."""
+    import json as _json
+    from backend.app.config import DESTINATION_COSTS_PATH
+    data = _json.loads(DESTINATION_COSTS_PATH.read_text())
+    cost = data.get(destination)
+    if cost is None:
+        return {"error": "unknown destination", "destination": destination}
+    return {
+        "destination": destination,
+        "estimated_cost_eur": cost,
+        "note": "Mock estimate (EUR per person, ~4-day trip).",
+    }
+
+
+def _rerank_travel_knowledge(query: str, taste_profile: str, k: int = 5, destination: str | None = None) -> dict:
+    """Search knowledge base then LLM-rerank by taste alignment."""
+    from backend.app.knowledge import search_travel_knowledge
+    from backend.app.reranker import llm_rerank
+    candidates = search_travel_knowledge(query, k=min(k * 3, 15), destination=destination)
+    if not candidates:
+        return {"results": []}
+    reranked = llm_rerank(candidates, query, taste_profile, k)
+    return {"results": reranked}
 
 
 def dispatch_tool(name: str, tool_input: dict) -> dict:
@@ -371,19 +397,15 @@ def dispatch_tool(name: str, tool_input: dict) -> dict:
     and never passes it here.
     """
     print(f"[tool] {name} {tool_input}", flush=True)
-    if name == "list_destinations":
-        return {"destinations": list_destinations()}
-    if name == "get_destination_details":
-        return get_destination_details(**tool_input)
-    if name == "check_budget_fit":
-        return check_budget_fit(**tool_input)
-    if name == "score_destinations":
-        return {"ranked": score_destinations(tool_input)}
+    if name == "get_destination_budget":
+        return get_destination_budget(**tool_input)
     if name == "convert_currency":
         return convert_currency(**tool_input)
     if name == "search_travel_knowledge":
         from backend.app.knowledge import search_travel_knowledge
         return {"results": search_travel_knowledge(**tool_input)}
+    if name == "rerank_travel_knowledge":
+        return _rerank_travel_knowledge(**tool_input)
     return {"error": "unknown tool", "name": name}
 
 

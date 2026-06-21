@@ -28,6 +28,11 @@ with st.form("trip_form"):
                                 "JPY": "Yen (JPY)"}[c],
         index=0,
     )
+    taste_profile = st.text_area(
+        "Taste profile (optional)",
+        placeholder="e.g. I love hiking and local food, hate tourist traps and crowded beaches.",
+        height=80,
+    )
 
     submitted = st.form_submit_button("Plan trip")
 
@@ -41,6 +46,7 @@ if submitted:
         "transport_preference": transport_preference,
         "physical_level": physical_level,
         "home_currency": home_currency,
+        "taste_profile": taste_profile,
     }
 
     try:
