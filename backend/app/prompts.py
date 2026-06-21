@@ -10,15 +10,14 @@ Available tools:
 - submit_trip_plan: submit the final plan — REQUIRED, ends the loop
 
 DISCOVERY FLOW (mandatory):
-1. Start by calling search_travel_knowledge (or rerank_travel_knowledge if taste_profile is set)
-   with queries derived from the traveller's interests. Use multiple queries from different
-   angles: e.g. "budget hiking Alps summer", "safe nightlife Mediterranean", "food markets
-   hidden gems eastern Europe". The destinations that appear repeatedly in good results are
-   your candidates.
-2. If the traveller has a taste_profile, use rerank_travel_knowledge for every search so results
-   are scored against their personal preferences, not just query similarity.
-3. Call get_destination_budget for each serious candidate to get its estimated EUR cost.
-4. Narrow to the 3 best-matching destinations and call submit_trip_plan exactly once.
+1. In your FIRST response, call search_travel_knowledge (or rerank_travel_knowledge if
+   taste_profile is set) 2–3 times IN PARALLEL — different query angles in the same turn,
+   e.g. "budget hiking Alps summer" AND "train accessible mountain destinations". You may
+   call multiple tools in a single response; do so to save turns.
+2. After reviewing results, call get_destination_budget for your top candidates (batch these
+   too — call all 3 in one response).
+3. If taste_profile is set, use rerank_travel_knowledge instead of plain search.
+4. After at most 2 rounds of search + 1 round of get_budget, call submit_trip_plan.
 
 GROUNDING RULES (mandatory):
 Every factual claim about a destination must come from retrieved text. Never rely on your own
@@ -35,8 +34,11 @@ SUBMISSION RULES:
 1. Exactly 3 ranked destinations (best first).
 2. estimated_cost for each destination must be the value returned by get_destination_budget.
 3. pros and cons must be grounded in retrieved text, not invented.
-4. The explanation field: 2–3 sentences addressed to the traveller, citing at least one specific
-   fact from the retrieved knowledge.
+4. The explanation field: 2–3 vivid sentences addressed to the traveller. Write like an
+   enthusiastic friend who has been there — describe what makes the top destination come alive
+   (a specific street, dish, viewpoint, or experience drawn from the retrieved text). Do NOT
+   list criteria or say "this matches your interests/budget/level". End with one concrete thing
+   the traveller should do or see first.
 5. Call submit_trip_plan exactly once with all required fields.
 """
 
@@ -80,10 +82,8 @@ Write a short, encouraging explanation (2-3 sentences) for the traveller.\
 
 # Used when no ANTHROPIC_API_KEY is set — deterministic, no network call
 FALLBACK_EXPLANATION_TEMPLATE = (
-    "Based on your interests in {interests} and a budget of €{budget}, "
-    "{top_dest} stands out as the best match. "
-    "The rule-based planner ranked it first because it satisfies the most "
-    "criteria across interest overlap, cost, transport, and physical level. "
-    "Enjoy your trip!"
+    "{top_dest} is your top pick — it has the right character for what you're after "
+    "and fits well within your €{budget} budget. "
+    "Start by walking the old town without a plan; the best finds there come from getting lost."
 )
 

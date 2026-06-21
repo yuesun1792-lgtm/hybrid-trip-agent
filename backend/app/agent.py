@@ -10,7 +10,7 @@ from backend.app.models import TripPlan, TripRequest
 from backend.app.prompts import build_agent_system_prompt
 from backend.app.tools import TOOL_SCHEMAS, dispatch_tool
 
-_MAX_ITERATIONS = 12
+_MAX_ITERATIONS = 16
 _NUDGE = (
     "You have not submitted a plan yet. "
     "Please call submit_trip_plan now with the complete trip plan."

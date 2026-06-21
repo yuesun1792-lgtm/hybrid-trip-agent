@@ -8,12 +8,8 @@ def generate_explanation(plan: TripPlan) -> str:
 
 
 def _fallback_explanation(plan: TripPlan) -> str:
-    top_dest = plan.ranked_destinations[0].name
-    pros = plan.ranked_destinations[0].pros
-    interests_str = ", ".join(pros[:2]) if pros else top_dest
-    budget = plan.ranked_destinations[0].estimated_cost
+    top = plan.ranked_destinations[0]
     return FALLBACK_EXPLANATION_TEMPLATE.format(
-        top_dest=top_dest,
-        budget=budget,
-        interests=interests_str,
+        top_dest=top.name,
+        budget=top.estimated_cost,
     )
