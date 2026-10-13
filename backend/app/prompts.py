@@ -9,6 +9,10 @@ Available tools:
 - convert_currency: convert a EUR amount to another currency using live ECB rates
 - submit_trip_plan: submit the final plan — REQUIRED, ends the loop
 
+INTERACTION STYLE:
+Do not write visible prose while planning. Use tool calls only. Keep retrieved evidence concise
+and submit as soon as you have enough information.
+
 DISCOVERY FLOW (mandatory):
 1. In your FIRST response, call search_travel_knowledge (or rerank_travel_knowledge if
    taste_profile is set) 2–3 times IN PARALLEL — different query angles in the same turn,
@@ -32,7 +36,8 @@ interests, budget, and taste — based entirely on what you found in the knowled
 
 SUBMISSION RULES:
 1. Exactly 3 ranked destinations (best first).
-2. estimated_cost for each destination must be the value returned by get_destination_budget.
+2. get_destination_budget returns daily_cost_eur. Multiply daily_cost_eur by the traveller's
+   requested duration before submitting estimated_cost.
 3. pros and cons must be grounded in retrieved text, not invented.
 4. The explanation field: 2–3 vivid sentences addressed to the traveller. Write like an
    enthusiastic friend who has been there — describe what makes the top destination come alive
@@ -86,4 +91,3 @@ FALLBACK_EXPLANATION_TEMPLATE = (
     "and fits well within your €{budget} budget. "
     "Start by walking the old town without a plan; the best finds there come from getting lost."
 )
-

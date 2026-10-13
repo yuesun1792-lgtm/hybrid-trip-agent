@@ -16,7 +16,7 @@ from __future__ import annotations
 import json
 import os
 
-import anthropic
+from backend.app.config import ANTHROPIC_MODEL
 
 
 def llm_rerank(
@@ -24,6 +24,7 @@ def llm_rerank(
     query: str,
     taste_profile: str,
     k: int,
+    raise_on_error: bool = False,
 ) -> list[dict]:
     """Score candidates by relevance to (query, taste_profile) via one Haiku call.
 
@@ -51,9 +52,11 @@ def llm_rerank(
     )
 
     try:
+        import anthropic
+
         client = anthropic.Anthropic(api_key=api_key)
         response = client.messages.create(
-            model="claude-haiku-4-5-20251001",
+            model=ANTHROPIC_MODEL,
             max_tokens=256,
             messages=[{"role": "user", "content": prompt}],
         )
@@ -62,6 +65,8 @@ def llm_rerank(
         for i, chunk in enumerate(candidates):
             chunk["rerank_score"] = float(scores[i]) / 10.0 if i < len(scores) else chunk["score"]
     except Exception:
+        if raise_on_error:
+            raise
         for chunk in candidates:
             chunk.setdefault("rerank_score", chunk["score"])
 

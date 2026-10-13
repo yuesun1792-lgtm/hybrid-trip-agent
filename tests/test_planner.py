@@ -5,9 +5,21 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from backend.app.explainer import _fallback_explanation, generate_explanation
-from backend.app.models import ToolInsight, TripRequest
+from backend.app.models import CandidateDestination, EvidenceChunk, ToolInsight, TripRequest
 from backend.app.planner import create_trip_plan, score_destination
 from backend.app.currency_tool import convert_currency
+from backend.app.planning_engine import deterministic_plan_from_state, state_from_request
+from backend.app.rag_enhancements import ResearchDecision
+from backend.app.candidate_discovery import (
+    build_discovery_queries,
+    discover_candidate_destinations,
+)
+from backend.app.candidate_ranker import rank_candidate_destinations, score_candidate
+from backend.app.rag_plan_builder import build_trip_plan_from_ranked_state
+from backend.app.costs import estimate_trip_cost, normalize_plan_costs
+from backend.app.chat import extract_fields, handle_chat, missing_fields
+from backend.app.models import ChatRequest
+from backend.app.strategy import decide_strategy
 from backend.app.tools import (
     check_budget_fit,
     dispatch_tool,
@@ -50,6 +62,21 @@ def test_fallback_explanation_contains_budget():
     assert str(plan.ranked_destinations[0].estimated_cost) in explanation
 
 
+def test_fallback_explanation_uses_request_budget_when_available():
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=4,
+        budget=1000,
+        interests=["food", "history", "nature"],
+        transport_preference="train",
+        physical_level="high",
+    )
+    plan = create_trip_plan(request)
+    explanation = _fallback_explanation(plan, request)
+    assert "€1000 budget" in explanation
+
+
 def test_generate_explanation_uses_fallback_when_no_api_key(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     plan = _make_plan()
@@ -65,6 +92,482 @@ def test_tool_signals_attached_to_all_ranked_destinations():
         assert dest.tool_signals.transport_hours > 0
         assert dest.tool_signals.weather_risk in ("low", "medium", "high")
         assert dest.tool_signals.estimated_total_cost > 0
+
+
+def test_state_from_request_preserves_normalized_request():
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=4,
+        budget=1000,
+        interests=["food", "history", "nature"],
+        transport_preference="train",
+        physical_level="high",
+    )
+    state = state_from_request(request, conversation_id="conv-1")
+    assert state.request == request
+    assert state.conversation_id == "conv-1"
+    assert state.stage == "ready_to_plan"
+    assert state.candidate_destinations == []
+    assert state.evidence == []
+
+
+def test_deterministic_plan_from_state_keeps_existing_plan_shape():
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=4,
+        budget=1000,
+        interests=["food", "history", "nature"],
+        transport_preference="train",
+        physical_level="high",
+    )
+    state = state_from_request(request)
+    plan = deterministic_plan_from_state(state, "test")
+    assert len(plan.ranked_destinations) == 3
+    assert len(plan.itinerary) == 4
+    assert plan.planner_mode == "deterministic_fallback"
+    assert plan.fallback_reason == "test"
+
+
+def test_build_discovery_queries_include_request_constraints():
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=4,
+        budget=1000,
+        interests=["food", "history", "nature"],
+        transport_preference="train",
+        physical_level="high",
+        taste_profile="I like mountain towns and dislike tourist traps.",
+    )
+    queries = build_discovery_queries(state_from_request(request))
+    joined = " ".join(queries)
+    assert "Munich" in joined
+    assert "train" in joined
+    assert "nature" in joined
+    assert "high" in joined
+    assert "mountain towns" in joined
+
+
+def test_discover_candidate_destinations_groups_rag_evidence(monkeypatch):
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=4,
+        budget=1000,
+        interests=["nature", "history"],
+        transport_preference="train",
+        physical_level="high",
+    )
+    state = state_from_request(request)
+
+    fake_results = [
+        {
+            "text": "Salzburg - Do\nMountain access and historic center.",
+            "score": 0.9,
+            "destination": "Salzburg",
+            "section": "Do",
+            "url": "https://en.wikivoyage.org/wiki/Salzburg",
+        },
+        {
+            "text": "Innsbruck - See\nAlpine city with old town.",
+            "score": 0.8,
+            "destination": "Innsbruck",
+            "section": "See",
+            "url": "https://en.wikivoyage.org/wiki/Innsbruck",
+        },
+        {
+            "text": "Salzburg - See\nBaroque old town.",
+            "score": 0.7,
+            "destination": "Salzburg",
+            "section": "See",
+            "url": "https://en.wikivoyage.org/wiki/Salzburg",
+        },
+    ]
+
+    monkeypatch.setattr(
+        "backend.app.candidate_discovery.search_travel_knowledge",
+        lambda query, k=6: fake_results,
+    )
+    discovered = discover_candidate_destinations(state)
+    assert discovered.stage == "candidates_discovered"
+    assert [candidate.name for candidate in discovered.candidate_destinations] == [
+        "Salzburg",
+        "Innsbruck",
+    ]
+    assert discovered.candidate_destinations[0].source == "rag"
+    assert len(discovered.candidate_destinations[0].evidence) == 3
+    assert discovered.evidence
+
+
+def test_score_candidate_adds_breakdown(monkeypatch):
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=4,
+        budget=1000,
+        interests=["nature", "history"],
+        transport_preference="train",
+        physical_level="high",
+    )
+    state = state_from_request(request)
+    candidate = CandidateDestination(
+        name="Salzburg",
+        source="rag",
+        score=0.9,
+        evidence=[
+            EvidenceChunk(
+                text="Salzburg has nature, mountain access, and history in the old town.",
+                destination="Salzburg",
+                section="Do",
+                score=0.9,
+            )
+        ],
+    )
+    monkeypatch.setattr(
+        "backend.app.candidate_ranker.estimate_transport_time",
+        lambda origin, destination: {"hours": 2.0, "mode": "train"},
+    )
+    scored = score_candidate(candidate, state, {"Salzburg": 700})
+    assert scored.score > 0
+    assert scored.score_breakdown["transport"] == 20
+    assert scored.score_breakdown["budget"] == 15
+    assert scored.score_breakdown["interests"] > 0
+
+
+def test_estimate_trip_cost_scales_four_day_mock_cost():
+    assert estimate_trip_cost("Salzburg", 2, {"Salzburg": 175}) == 350
+    assert estimate_trip_cost("Salzburg", 4, {"Salzburg": 175}) == 700
+
+
+def test_rank_candidate_destinations_orders_by_constraints(monkeypatch):
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=4,
+        budget=1000,
+        interests=["nature", "history"],
+        transport_preference="train",
+        physical_level="high",
+    )
+    state = state_from_request(request).model_copy(
+        update={
+            "candidate_destinations": [
+                CandidateDestination(
+                    name="Lisbon",
+                    source="rag",
+                    score=0.95,
+                    evidence=[EvidenceChunk(text="Lisbon has history.", destination="Lisbon")],
+                ),
+                CandidateDestination(
+                    name="Salzburg",
+                    source="rag",
+                    score=0.75,
+                    evidence=[
+                        EvidenceChunk(
+                            text="Salzburg has nature, mountain access, and history.",
+                            destination="Salzburg",
+                        )
+                    ],
+                ),
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        "backend.app.candidate_ranker.estimate_transport_time",
+        lambda origin, destination: {
+            "Lisbon": {"hours": 3.0, "mode": "flight"},
+            "Salzburg": {"hours": 2.0, "mode": "train"},
+        }[destination],
+    )
+    ranked = rank_candidate_destinations(state)
+    assert ranked.stage == "candidates_ranked"
+    assert ranked.candidate_destinations[0].name == "Salzburg"
+    assert ranked.candidate_destinations[0].score_breakdown["transport"] == 20
+    assert ranked.candidate_destinations[1].score_breakdown["transport"] == -15
+
+
+def test_rank_candidate_destinations_filters_over_budget_when_matches_exist(monkeypatch):
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=2,
+        budget=400,
+        interests=["nature", "history"],
+        transport_preference="bus",
+        physical_level="medium",
+    )
+    state = state_from_request(request).model_copy(
+        update={
+            "candidate_destinations": [
+                CandidateDestination(
+                    name="Salzburg",
+                    source="rag",
+                    score=0.7,
+                    evidence=[EvidenceChunk(text="Salzburg has nature and history.")],
+                ),
+                CandidateDestination(
+                    name="Paris",
+                    source="rag",
+                    score=0.95,
+                    evidence=[EvidenceChunk(text="Paris has food, history, and architecture.")],
+                ),
+            ]
+        }
+    )
+    monkeypatch.setattr(
+        "backend.app.candidate_ranker.estimate_transport_time",
+        lambda origin, destination: {"hours": 2.0, "mode": "bus"},
+    )
+    ranked = rank_candidate_destinations(state)
+    names = [candidate.name for candidate in ranked.candidate_destinations]
+    assert "Salzburg" in names
+    assert "Paris" not in names
+    assert ranked.filtered_candidates[0].name == "Paris"
+    assert "exceeds €400 budget" in ranked.filtered_candidates[0].filtered_reason
+
+
+def test_build_trip_plan_from_ranked_state_uses_candidates(monkeypatch):
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=4,
+        budget=1000,
+        interests=["nature", "history"],
+        transport_preference="train",
+        physical_level="high",
+    )
+    ranked_state = state_from_request(request).model_copy(
+        update={
+            "stage": "candidates_ranked",
+            "candidate_destinations": [
+                CandidateDestination(
+                    name="Salzburg",
+                    country="Austria",
+                    source="rag",
+                    score=66,
+                    score_breakdown={"transport": 20, "budget": 15},
+                    rationale="transport train from Munich; within budget",
+                    evidence=[
+                        EvidenceChunk(
+                            text="Salzburg - Do\nMountain access and historic center.",
+                            destination="Salzburg",
+                            section="Do",
+                            url="https://en.wikivoyage.org/wiki/Salzburg",
+                        )
+                    ],
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr(
+        "backend.app.rag_plan_builder.gather_tool_insights",
+        lambda origin, destination, date_range, trip_length: ToolInsight(
+            transport_hours=2,
+            transport_mode="train",
+            weather_risk="low",
+            weather_note="Warm",
+            estimated_total_cost=700,
+        ),
+    )
+    plan = build_trip_plan_from_ranked_state(ranked_state)
+    assert plan.planner_mode == "rag_ranked"
+    assert plan.ranked_destinations[0].name == "Salzburg"
+    assert plan.ranked_destinations[0].estimated_cost == 700
+    assert plan.ranked_destinations[0].score_breakdown["transport"] == 20
+    assert plan.ranked_destinations[0].citations[0].url
+    assert plan.tradeoff_summary
+    assert len(plan.itinerary) == 4
+
+
+def test_build_trip_plan_from_ranked_state_scales_cost_to_trip_length(monkeypatch):
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=2,
+        budget=400,
+        interests=["nature", "history"],
+        transport_preference="bus",
+        physical_level="medium",
+    )
+    ranked_state = state_from_request(request).model_copy(
+        update={
+            "stage": "candidates_ranked",
+            "candidate_destinations": [
+                CandidateDestination(
+                    name="Salzburg",
+                    country="Austria",
+                    source="rag",
+                    score=66,
+                    score_breakdown={"transport": 20, "budget": 25},
+                    rationale="transport bus from Munich; estimated €350",
+                    evidence=[EvidenceChunk(text="Salzburg - Do\nHistoric center and nature.")],
+                )
+            ],
+        }
+    )
+    monkeypatch.setattr(
+        "backend.app.rag_plan_builder.gather_tool_insights",
+        lambda origin, destination, date_range, trip_length: ToolInsight(
+            transport_hours=2,
+            transport_mode="bus",
+            weather_risk="low",
+            weather_note="Warm",
+            estimated_total_cost=350,
+        ),
+    )
+    plan = build_trip_plan_from_ranked_state(ranked_state)
+    assert plan.ranked_destinations[0].estimated_cost == 350
+
+
+def test_normalize_plan_costs_scales_agent_output_and_home_currency():
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=2,
+        budget=400,
+        interests=["nature"],
+        transport_preference="bus",
+        physical_level="medium",
+    )
+    plan = create_trip_plan(request).model_copy(
+        update={
+            "ranked_destinations": [
+                create_trip_plan(request).ranked_destinations[0].model_copy(
+                    update={
+                        "name": "Salzburg",
+                        "estimated_cost": 700,
+                        "estimated_cost_home": 5434,
+                    }
+                )
+            ]
+        }
+    )
+    normalized = normalize_plan_costs(plan, request)
+    assert normalized.ranked_destinations[0].estimated_cost == 350
+    assert normalized.ranked_destinations[0].estimated_cost_home == 2717
+
+
+def test_plan_trip_uses_rag_when_agent_disabled(monkeypatch):
+    monkeypatch.setenv("ENABLE_ANTHROPIC_AGENT", "false")
+
+    from backend.app.main import plan_trip
+    import backend.app.main as main_module
+
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=4,
+        budget=1000,
+        interests=["nature", "history"],
+        transport_preference="train",
+        physical_level="high",
+    )
+    expected = create_trip_plan(request).model_copy(
+        update={"planner_mode": "rag_ranked", "fallback_reason": None}
+    )
+    monkeypatch.setattr(main_module, "plan_from_state", lambda state: expected)
+    plan = plan_trip(request)
+    assert plan.planner_mode == "rag_ranked"
+    assert plan.fallback_reason is None
+
+
+def test_train_preference_uses_actual_transport_signal():
+    request = TripRequest(
+        origin_city="Munich",
+        date_range="July 10-15",
+        trip_length=4,
+        budget=1000,
+        interests=["food", "history", "nature"],
+        transport_preference="train",
+        physical_level="high",
+    )
+    plan = create_trip_plan(request)
+    assert plan.ranked_destinations[0].name != "Lisbon"
+    assert plan.ranked_destinations[0].tool_signals.transport_mode == "train"
+
+
+def test_chat_extract_fields_from_natural_language():
+    fields = extract_fields(
+        "I have 2 days from Munich in July, budget 400, food history nature, prefer bus, medium pace."
+    )
+    assert fields["origin_city"] == "Munich"
+    assert fields["trip_length"] == 2
+    assert fields["budget"] == 400
+    assert fields["transport_preference"] == "bus"
+    assert fields["physical_level"] == "medium"
+    assert fields["date_range"] == "July"
+    assert fields["interests"] == ["food", "history", "nature"]
+    assert missing_fields(fields) == []
+
+
+def test_chat_extract_fields_from_fixed_destination():
+    fields = extract_fields("3 days in Paris for food and art")
+    assert fields["destination"] == "Paris"
+    assert fields["trip_length"] == 3
+    assert fields["interests"] == ["food", "art"]
+
+
+def test_chat_extract_fields_from_chinese_fixed_destination():
+    fields = extract_fields("我想去巴黎玩三天")
+    assert fields["destination"] == "Paris"
+    assert fields["trip_length"] == 3
+
+
+def test_strategy_routes_fixed_destination(monkeypatch):
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    fields = extract_fields("3 days in Paris for food and art")
+    decision = decide_strategy("3 days in Paris for food and art", fields)
+    assert decision.intent == "plan_fixed_destination"
+    assert decision.next_action == "run_fixed_itinerary"
+
+
+def test_chat_asks_for_missing_fields():
+    response = handle_chat(ChatRequest(message="I want food and history from Munich."))
+    assert response.plan is None
+    assert response.missing_fields
+    assert response.extracted_fields["origin_city"] == "Munich"
+    assert "?" in response.assistant_message
+
+
+def test_chat_routes_fixed_destination_plan(monkeypatch):
+    monkeypatch.setattr(
+        "backend.app.fixed_itinerary.search_travel_knowledge",
+        lambda query, k=6, destination=None: [
+            {
+                "text": "Paris - See\nMuseums, neighborhoods, and riverside walks.",
+                "score": 0.9,
+                "destination": "Paris",
+                "section": "See",
+                "url": "https://en.wikivoyage.org/wiki/Paris",
+            }
+        ],
+    )
+    response = handle_chat(ChatRequest(message="3 days in Paris for food and art"))
+    assert response.plan is not None
+    assert response.plan.planner_mode == "fixed_destination_itinerary"
+    assert response.plan.ranked_destinations[0].name == "Paris"
+    assert len(response.plan.itinerary) == 3
+
+
+def test_chat_generates_plan_when_fields_complete(monkeypatch):
+    import backend.app.chat as chat_module
+    request = ChatRequest(
+        message="2 days from Munich in July, budget 400, food history nature, bus, medium"
+    )
+    monkeypatch.setattr(
+        chat_module,
+        "plan_from_state",
+        lambda state: create_trip_plan(state.request).model_copy(
+            update={"planner_mode": "rag_ranked"}
+        ),
+    )
+    response = handle_chat(request)
+    assert response.plan is not None
+    assert response.state is not None
+    assert response.plan.planner_mode == "rag_ranked"
+    assert response.missing_fields == []
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +838,35 @@ def test_create_plan_fallback_when_no_submit(monkeypatch):
     assert plan.ranked_destinations[0].name in plan.explanation
 
 
+def test_create_plan_recovers_from_max_tokens(monkeypatch):
+    """If the model hits max_tokens once, the loop nudges it to submit instead of fallback."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
+    monkeypatch.setenv("ANTHROPIC_AGENT_MAX_TOKENS", "4096")
+
+    submit_block = _make_tool_use_block("submit_trip_plan", "tu_1", _VALID_SUBMIT_INPUT)
+
+    mock_create = MagicMock(side_effect=[
+        _make_response("max_tokens", []),
+        _make_response("tool_use", [submit_block]),
+    ])
+    mock_client = MagicMock()
+    mock_client.messages.create = mock_create
+
+    import backend.app.agent as agent_module
+    request = TripRequest(
+        origin_city="Munich", date_range="June 10-15", trip_length=4,
+        budget=700, interests=["food", "history"],
+        transport_preference="train", physical_level="medium",
+    )
+    with patch.object(agent_module, "anthropic") as mock_anthropic:
+        mock_anthropic.Anthropic.return_value = mock_client
+        plan = agent_module.create_plan(request)
+
+    assert plan.planner_mode == "llm_agent"
+    assert plan.fallback_reason is None
+    assert mock_create.call_count == 2
+
+
 # ---------------------------------------------------------------------------
 # home_currency: models + agent loop
 # ---------------------------------------------------------------------------
@@ -456,6 +988,38 @@ def test_no_key_fallback_returns_none_for_home_currency_fields(monkeypatch):
     for dest in plan.ranked_destinations:
         assert dest.estimated_cost_home is None
         assert dest.home_currency is None
+
+
+def test_plan_trip_ignores_legacy_agent_flag(monkeypatch):
+    monkeypatch.setenv("ENABLE_ANTHROPIC_AGENT", "false")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
+
+    from backend.app.main import plan_trip
+    import backend.app.main as main_module
+    req = TripRequest(
+        origin_city="Munich", date_range="June 10-15", trip_length=4,
+        budget=700, interests=["food"], transport_preference="train", physical_level="low",
+    )
+    expected = create_trip_plan(req).model_copy(update={"planner_mode": "rag_ranked"})
+    monkeypatch.setattr(main_module, "plan_from_state", lambda state: expected)
+    plan = plan_trip(req)
+    assert plan.planner_mode == "rag_ranked"
+
+
+def test_plan_trip_without_key_still_uses_shared_planner(monkeypatch):
+    monkeypatch.setenv("ENABLE_ANTHROPIC_AGENT", "true")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "")
+
+    from backend.app.main import plan_trip
+    import backend.app.main as main_module
+    req = TripRequest(
+        origin_city="Munich", date_range="June 10-15", trip_length=4,
+        budget=700, interests=["food"], transport_preference="train", physical_level="low",
+    )
+    expected = create_trip_plan(req).model_copy(update={"planner_mode": "rag_ranked"})
+    monkeypatch.setattr(main_module, "plan_from_state", lambda state: expected)
+    plan = plan_trip(req)
+    assert plan.planner_mode == "rag_ranked"
 
 
 def test_build_agent_system_prompt_eur_skips_conversion():
@@ -639,7 +1203,9 @@ def test_get_destination_budget_known():
     from backend.app.tools import get_destination_budget
     result = get_destination_budget("Prague")
     assert result["destination"] == "Prague"
-    assert result["estimated_cost_eur"] == 520
+    assert result["daily_cost_eur"] == 130
+    assert result["estimated_cost_eur"] == 130
+    assert result["basis"] == "per_person_per_day"
     assert "error" not in result
 
 
@@ -666,7 +1232,8 @@ def test_get_destination_budget_covers_all_22():
 
 def test_dispatch_tool_get_destination_budget():
     result = dispatch_tool("get_destination_budget", {"destination": "Lisbon"})
-    assert result["estimated_cost_eur"] == 650
+    assert result["daily_cost_eur"] == 163
+    assert result["estimated_cost_eur"] == 163
     assert result["destination"] == "Lisbon"
 
 
@@ -716,6 +1283,170 @@ def test_llm_rerank_fallback_on_no_api_key(monkeypatch):
     result = llm_rerank([dict(c) for c in candidates], "query", "profile", k=2)
     assert result[0]["destination"] == "Lisbon"
     assert len(result) == 2
+
+
+def test_research_loop_stops_at_configured_round_limit(monkeypatch):
+    import backend.app.planning_engine as engine
+
+    request = TripRequest(
+        origin_city="Munich", date_range="June", trip_length=3, budget=700,
+        interests=["food"], transport_preference="train", physical_level="medium",
+    )
+    state = state_from_request(request)
+    candidate = CandidateDestination(
+        name="Prague",
+        evidence=[EvidenceChunk(text="Prague food markets", destination="Prague")],
+    )
+    decisions = []
+
+    def fake_decision(current_state, searched_queries, round_number):
+        decisions.append(round_number)
+        return ResearchDecision(
+            action="search",
+            queries=[f"query {round_number}"],
+            reason="Need more evidence",
+            evidence_gaps=["coverage"],
+        )
+
+    monkeypatch.setattr(engine, "llm_rag_enhancements_enabled", lambda: True)
+    monkeypatch.setattr(engine, "research_max_rounds", lambda: 3)
+    monkeypatch.setattr(engine, "decide_research", fake_decision)
+    monkeypatch.setattr(
+        engine,
+        "discover_candidate_destinations",
+        lambda current_state, **kwargs: current_state.model_copy(
+            update={"candidate_destinations": [candidate]}
+        ),
+    )
+    monkeypatch.setattr(engine, "rank_candidates_for_state", lambda current_state: current_state)
+    monkeypatch.setattr(engine, "rerank_candidates", lambda candidates, current_state: candidates)
+    monkeypatch.setattr(engine, "write_candidate_copy", lambda candidates, current_state: {})
+    monkeypatch.setattr(
+        engine,
+        "build_trip_plan_from_ranked_state",
+        lambda current_state, generated_copy, planner_mode: create_trip_plan(request).model_copy(
+            update={"planner_mode": planner_mode}
+        ),
+    )
+
+    plan = engine.rag_plan_from_state(state)
+    assert decisions == [1, 2, 3]
+    assert plan.planner_mode == "rag_ranked_llm"
+
+
+def test_llm_research_failure_degrades_to_deterministic_rag(monkeypatch):
+    import backend.app.planning_engine as engine
+
+    request = TripRequest(
+        origin_city="Munich", date_range="June", trip_length=3, budget=700,
+        interests=["food"], transport_preference="train", physical_level="medium",
+    )
+    state = state_from_request(request)
+    candidate = CandidateDestination(
+        name="Prague",
+        evidence=[EvidenceChunk(text="Prague food markets", destination="Prague")],
+    )
+
+    monkeypatch.setattr(engine, "llm_rag_enhancements_enabled", lambda: True)
+    monkeypatch.setattr(engine, "decide_research", lambda *args: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(
+        engine,
+        "discover_candidate_destinations",
+        lambda current_state, **kwargs: current_state.model_copy(
+            update={"candidate_destinations": [candidate]}
+        ),
+    )
+    monkeypatch.setattr(engine, "rank_candidates_for_state", lambda current_state: current_state)
+    monkeypatch.setattr(engine, "rerank_candidates", lambda *args: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(engine, "write_candidate_copy", lambda *args: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr(
+        engine,
+        "build_trip_plan_from_ranked_state",
+        lambda current_state, generated_copy, planner_mode: create_trip_plan(request).model_copy(
+            update={"planner_mode": planner_mode}
+        ),
+    )
+
+    plan = engine.rag_plan_from_state(state)
+    assert plan.planner_mode == "rag_ranked"
+
+
+def test_no_key_path_uses_rag_backbone(monkeypatch):
+    import backend.app.planning_engine as engine
+
+    request = TripRequest(
+        origin_city="Munich", date_range="June", trip_length=3, budget=700,
+        interests=["food"], transport_preference="train", physical_level="medium",
+    )
+    state = state_from_request(request)
+    candidate = CandidateDestination(
+        name="Prague",
+        evidence=[EvidenceChunk(text="Food market", destination="Prague", url="https://example.test")],
+    )
+    calls = []
+
+    monkeypatch.setattr(engine, "llm_rag_enhancements_enabled", lambda: False)
+    monkeypatch.setattr(
+        engine,
+        "discover_candidates_for_state",
+        lambda current_state: calls.append("discover") or current_state.model_copy(
+            update={"candidate_destinations": [candidate]}
+        ),
+    )
+    monkeypatch.setattr(
+        engine,
+        "rank_candidates_for_state",
+        lambda current_state: calls.append("rank") or current_state,
+    )
+    monkeypatch.setattr(
+        engine,
+        "build_trip_plan_from_ranked_state",
+        lambda current_state, generated_copy, planner_mode: create_trip_plan(request).model_copy(
+            update={"planner_mode": planner_mode}
+        ),
+    )
+
+    plan = engine.rag_plan_from_state(state)
+    assert calls == ["discover", "rank"]
+    assert plan.planner_mode == "rag_ranked"
+
+
+def test_generated_copy_rejects_unknown_evidence_ids(monkeypatch):
+    import backend.app.rag_enhancements as enhancements
+
+    request = TripRequest(
+        origin_city="Munich", date_range="June", trip_length=3, budget=700,
+        interests=["food"], transport_preference="train", physical_level="medium",
+    )
+    state = state_from_request(request)
+    candidates = [
+        CandidateDestination(
+            name="Prague",
+            evidence=[
+                EvidenceChunk(
+                    text="Prague has food markets.",
+                    destination="Prague",
+                    url="https://en.wikivoyage.org/wiki/Prague",
+                )
+            ],
+        )
+    ]
+    monkeypatch.setattr(
+        enhancements,
+        "_ask_json",
+        lambda *args, **kwargs: {
+            "candidates": [
+                {
+                    "name": "Prague",
+                    "pro_points": [{"text": "Good food", "evidence_ids": ["Prague:99"]}],
+                    "con_points": [],
+                }
+            ]
+        },
+    )
+
+    with pytest.raises(ValueError, match="outside the retrieved candidate set"):
+        enhancements.write_candidate_copy(candidates, state)
 
 
 def test_dispatch_tool_rerank_travel_knowledge(monkeypatch):

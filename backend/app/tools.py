@@ -365,17 +365,18 @@ TOOL_SCHEMAS = [
 # ---------------------------------------------------------------------------
 
 def get_destination_budget(destination: str) -> dict:
-    """Return the estimated EUR cost for a destination from destination_costs.json."""
-    import json as _json
-    from backend.app.config import DESTINATION_COSTS_PATH
-    data = _json.loads(DESTINATION_COSTS_PATH.read_text())
-    cost = data.get(destination)
-    if cost is None:
+    """Return the estimated daily EUR cost for a destination from destination_costs.json."""
+    from backend.app.costs import load_daily_costs
+    costs = load_daily_costs()
+    daily_cost = costs.get(destination)
+    if daily_cost is None:
         return {"error": "unknown destination", "destination": destination}
     return {
         "destination": destination,
-        "estimated_cost_eur": cost,
-        "note": "Mock estimate (EUR per person, ~4-day trip).",
+        "daily_cost_eur": daily_cost,
+        "estimated_cost_eur": daily_cost,
+        "basis": "per_person_per_day",
+        "note": "Mock estimate in EUR per person per day. Multiply by trip duration for total trip cost.",
     }
 
 

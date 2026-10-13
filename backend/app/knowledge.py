@@ -9,6 +9,8 @@ Everything that might need to be swapped for Chroma later lives here.
 
 from __future__ import annotations
 
+import re
+
 import numpy as np
 
 # ---------------------------------------------------------------------------
@@ -48,6 +50,57 @@ def _embed_query(query: str) -> np.ndarray:
     return _get_model().encode([query], show_progress_bar=False)[0].astype(np.float32)
 
 
+_STOPWORDS = {
+    "a", "an", "and", "are", "around", "at", "best", "day", "days", "do", "for",
+    "from", "get", "how", "in", "is", "itinerary", "of", "on", "or", "the",
+    "to", "travel", "trip", "what", "with",
+}
+
+
+def _query_terms(query: str) -> set[str]:
+    return {
+        term
+        for term in re.findall(r"[a-zA-Z][a-zA-Z-]{2,}", query.lower())
+        if term not in _STOPWORDS
+    }
+
+
+def _lexical_search(
+    query: str,
+    texts: list[str],
+    metadata: list[dict],
+    k: int,
+    destination: str | None,
+) -> list[dict]:
+    """Small no-model fallback over the stored corpus text."""
+    terms = _query_terms(query)
+    if destination:
+        terms.add(destination.lower())
+    scored = []
+    dest_lower = destination.strip().lower() if destination else ""
+    for index, text in enumerate(texts):
+        meta = metadata[index]
+        if dest_lower and meta.get("destination", "").lower() != dest_lower:
+            continue
+        haystack = f"{meta.get('destination', '')} {meta.get('section', '')} {text}".lower()
+        overlap = sum(1 for term in terms if term in haystack)
+        if overlap <= 0:
+            continue
+        scored.append((overlap / max(len(terms), 1), index))
+
+    scored.sort(reverse=True)
+    results = []
+    for score, index in scored[:k]:
+        results.append({
+            "text": texts[index],
+            "score": float(score),
+            "destination": metadata[index].get("destination", ""),
+            "section": metadata[index].get("section", ""),
+            "url": metadata[index].get("url", ""),
+        })
+    return results
+
+
 # ---------------------------------------------------------------------------
 # Public search function
 # ---------------------------------------------------------------------------
@@ -70,7 +123,10 @@ def search_travel_knowledge(
     texts: list[str]       = index["texts"]
     metadata: list[dict]   = index["metadata"]
 
-    query_vec = _embed_query(query)
+    try:
+        query_vec = _embed_query(query)
+    except Exception:
+        return _lexical_search(query, texts, metadata, min(k, 10), destination)
 
     # Cosine similarity: dot product of L2-normalised vectors
     emb_norms = np.linalg.norm(embeddings, axis=1, keepdims=True) + 1e-10

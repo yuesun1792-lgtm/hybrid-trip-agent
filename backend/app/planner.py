@@ -34,7 +34,12 @@ def score_destination(
 
     # Tool-signal adjustments: small, deterministic, additive
     if tool_insight is not None:
-        if tool_insight.transport_hours <= 3:
+        if tool_insight.transport_mode == request.transport_preference:
+            score += 2
+        else:
+            score -= 3
+
+        if tool_insight.transport_mode == request.transport_preference and tool_insight.transport_hours <= 3:
             score += 1
         elif tool_insight.transport_hours > 6:
             score -= 1
@@ -102,4 +107,3 @@ def create_trip_plan(request: TripRequest) -> TripPlan:
         risks=risks,
         final_recommendation=f"Choose {top_destination.name}, {top_destination.country} for the best match.",
     )
-

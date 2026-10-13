@@ -1,11 +1,14 @@
-import os
-
 from dotenv import load_dotenv
 from fastapi import FastAPI
 
-from backend.app.explainer import generate_explanation
-from backend.app.models import TripPlan, TripRequest
-from backend.app.planner import create_trip_plan
+from backend.app.chat import handle_chat
+from backend.app.models import ChatRequest, ChatResponse, PlanningState, TripPlan, TripRequest
+from backend.app.planning_engine import (
+    discover_candidates_for_state,
+    plan_from_state,
+    rank_candidates_for_state,
+    state_from_request,
+)
 
 # Load .env when present; no-op if the file does not exist.
 load_dotenv()
@@ -20,14 +23,22 @@ def health_check() -> dict[str, str]:
 
 @app.post("/plan", response_model=TripPlan)
 def plan_trip(request: TripRequest) -> TripPlan:
-    if os.environ.get("ANTHROPIC_API_KEY"):
-        try:
-            import anthropic  # noqa: F401 — ensure package present before importing agent
-            from backend.app.agent import create_plan
-            return create_plan(request)
-        except Exception:
-            pass  # fall through to deterministic path
+    return plan_from_state(state_from_request(request))
 
-    plan = create_trip_plan(request)
-    explanation = generate_explanation(plan)
-    return plan.model_copy(update={"explanation": explanation})
+
+@app.post("/plan/candidates", response_model=PlanningState)
+def discover_candidates(request: TripRequest) -> PlanningState:
+    state = state_from_request(request)
+    return discover_candidates_for_state(state)
+
+
+@app.post("/plan/ranked-candidates", response_model=PlanningState)
+def rank_candidates(request: TripRequest) -> PlanningState:
+    state = state_from_request(request)
+    discovered = discover_candidates_for_state(state)
+    return rank_candidates_for_state(discovered)
+
+
+@app.post("/chat", response_model=ChatResponse)
+def chat(request: ChatRequest) -> ChatResponse:
+    return handle_chat(request)

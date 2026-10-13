@@ -4,7 +4,7 @@ scripts/build_index.py — one-time offline ingest for V4 RAG.
   python scripts/build_index.py [--dry-run] [--sources data/wikivoyage_sources.json]
 
 Fetches each Wikivoyage page via the MediaWiki API (wikitext), splits it
-into per-section chunks, embeds them with sentence-transformers, and saves
+into per-section chunks, *embeds* them with sentence-transformers, and saves
 the index to data/knowledge_index.npz.
 
 Run again whenever wikivoyage_sources.json changes.
