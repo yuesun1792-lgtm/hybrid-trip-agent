@@ -132,43 +132,25 @@ inconsistency to resolve, not a design decision to preserve.
 
 ## Architecture
 
+```text
+backend/app/
+  main.py          # FastAPI entry point
+  config.py        # Shared configuration and project paths
+  conversation/    # Chat, state, intent routing and language
+  domain/          # Shared schemas, normalization and destination names
+  planning/        # Current planning workflow, revision, validation and storage
+  rag/             # Retrieval, reranking and discovery research
+  tool_calling/    # Tool implementations, schemas and execution
+  places/          # Place resolution, Geoapify and MCP client/server
+  llm/             # Model adapters, token usage and prompts
+  runtime/         # Execution budgets and trajectories
+  legacy/          # Earlier planners and compatibility adapters
+frontend/          # Streamlit UI and HTTP client
+scripts/           # Index building, evaluation and smoke-test entry points
+tests/             # Automated regression tests
 ```
-eurotrip-agent/
-  backend/app/
-    config.py             # Path constants
-    models.py              # Pydantic schemas: TripRequest, TripPlan, PlanningState,
-                            #   CandidateDestination, EvidenceChunk, ChatRequest/ChatResponse
-    planner.py             # Deterministic scorer — legacy tool + ultimate fallback (code unchanged)
-    tools.py               # Tool implementations + Anthropic schemas (submit_trip_plan, etc.)
-    currency_tool.py       # REAL tool: convert_currency via Frankfurter API
-    knowledge.py           # V4: load index + search_travel_knowledge (in-memory cosine)
-    reranker.py            # V5: LLM cross-encoder rerank (rerank_travel_knowledge tool)
-    agent.py               # Claude tool-use loop that DRIVES planning; ends on submit_trip_plan
-    planning_engine.py     # V5: thin boundary — TripRequest -> PlanningState -> plan
-    candidate_discovery.py # V5: RAG-only (non-agentic) candidate discovery
-    candidate_ranker.py    # V5: constraint-aware scoring + score_breakdown
-    rag_plan_builder.py    # V5: ranked candidates -> TripPlan (citations, tradeoff_summary)
-    costs.py               # V5: destination_costs.json loader + trip-length cost scaling
-    chat.py                # V6 (started early): stateless slot-filling -> TripRequest -> plan
-    explainer.py           # Template explanation used on the deterministic-fallback path
-    prompts.py             # System prompt (LLM agent)
-    main.py                # FastAPI: /plan, /plan/candidates, /plan/ranked-candidates, /chat
-  frontend/
-    streamlit_app.py # Form tab (POST /plan) + Chat tab (POST /chat), tradeoffs/citations UI
-  scripts/
-    build_index.py    # V4: one-time ingest — fetch Wikivoyage, chunk, embed, save index
-    eval_retrieval.py  # V5: manual recall@k harness for the retriever (not wired into pytest/CI)
-  data/
-    destination_notes.json     # legacy 4-entry mock destinations (deterministic fallback only)
-    wikivoyage_sources.json    # V4: curated list of 22 destinations/pages to fetch
-    destination_costs.json     # V5: per-day EUR cost for all 22 destinations
-    knowledge_index.npz        # V4: built corpus (chunks + embeddings + metadata) — gitignored
-    user_preferences.json      # dead file — not read by any code, left over from an earlier iteration
-  tests/
-  requirements.txt
-  .env.example
-  docs/architecture_review.md  # full architecture audit — read before starting new work here
-```
+
+See `docs/directory_structure.md` for module ownership and import paths.
 
 ## Roadmap
 

@@ -6,9 +6,9 @@ An optional local MCP place-resolution node is described in [place resolution](p
 
 ## Business contracts
 
-`planning_models.py` defines `TripConstraints`, `PlanningTask`, `Day`, `Activity`,
+`domain/planning_models.py` defines `TripConstraints`, `PlanningTask`, `Day`, `Activity`,
 `RevisionRequest`, `RevisionChange`, `AffectedScope` and `ValidationIssue`.
-`models.py` contains API response/evidence/analysis models and keeps `ItineraryDay` as
+`domain/models.py` contains API response/evidence/analysis models and keeps `ItineraryDay` as
 an alias of `Day` for compatibility. `TripPlan.itinerary` and each day's `plan` text
 remain available; the editable business source is `Day.activities`.
 
@@ -33,16 +33,16 @@ Chat/form adapter
   -> language presentation (does not overwrite committed state)
 ```
 
-`task_builder.py` converts inputs into a common task. Both specified and unspecified
+`planning/task_builder.py` converts inputs into a common task. Both specified and unspecified
 destinations use `destination_analysis.analyze_destination`. Overview analysis reuses
 discovery evidence and avoids generating a schedule per candidate. Only selected
 cities receive detailed retrieval and full daily activities. `requested_output=options`
 returns candidate comparisons with an empty itinerary. Selecting a city in a subsequent
 turn can promote options into a full plan.
 
-`unified_planner.py` owns scheduling. The active router uses `plan_trip` for creation regardless of destination presence; legacy intent labels remain accepted for compatibility. Explicit requested output overrides model suggestions. Candidate discovery may ask an LLM for new English
+`planning/unified_planner.py` owns scheduling. The active router uses `plan_trip` for creation regardless of destination presence; legacy intent labels remain accepted for compatibility. Explicit requested output overrides model suggestions. Candidate discovery may ask an LLM for new English
 queries, bounded by round/query/candidate limits. It cannot invent candidate facts.
-`plan_builder.py` generates 1-3, 1-4 or 1-6 activities per day for low, medium or high
+`planning/plan_builder.py` generates 1-3, 1-4 or 1-6 activities per day for low, medium or high
 pacing respectively (default: medium). Fewer activities are permitted. Longer trips are generated in batches of at most four days with global day numbers and shared stable evidence IDs; failed batches are explicit fallbacks rather than silently dropping days. Pacing is a count
 limit, not a verified time/transport feasibility guarantee.
 
@@ -83,14 +83,14 @@ heuristics. Unspecified or invalid targets are not clamped to an arbitrary day.
 
 ## Validation and commit
 
-`plan_validation.py` checks consecutive day numbers, dates, confirmed destination,
+`planning/plan_validation.py` checks consecutive day numbers, dates, confirmed destination,
 unique IDs, activity presence/count, evidence existence/city, excessive known duration,
 preservation and estimated budget issues. It reports unknown logistics. Citation IDs
 are attached to each activity and citation; final references are built from activity
 references. JSON/schema success does not prove factual entailment, venue opening hours,
 travel connections or real-world suitability. Such facts still need trusted live tools.
 
-`plan_store.py` provides a repository protocol and an in-memory implementation with
+`planning/plan_store.py` provides a repository protocol and an in-memory implementation with
 optimistic version checks and deep-copy snapshots. One conversation serializes its turns;
 independent conversations can run concurrently. Stale `expected_plan_version` returns
 HTTP 409 before expensive calls. Validation failures do not commit a draft. Read canonical
@@ -103,7 +103,7 @@ for a future persistence or LangGraph integration.
 
 ## Tools, budgets, language and trace
 
-`tool_executor.py` validates registered read-only tools, accounts for calls and returns a
+`tool_calling/tool_executor.py` validates registered read-only tools, accounts for calls and returns a
 common result/error envelope. Local retrieval and mock transport currently use it.
 The place-resolution node uses a separate bounded stdio MCP adapter with the same shared
 run budget/trajectory context. It discovers two approved tools backed by real Geoapify,
@@ -111,7 +111,7 @@ and resolves only new activity IDs before validation/commit. External writes and
 policies are not implemented. The deprecated Anthropic agent/tool loop remains available for
 historical callers and tests but is not used by the HTTP planning endpoints.
 
-`execution.py` holds a per-run context: deadline, tool/LLM call counts and conservative
+`runtime/execution.py` holds a per-run context: deadline, tool/LLM call counts and conservative
 maximum-output-token reservations. Limits are checked before calls; LLM timeouts are
 capped by remaining time. These are cooperative admission limits, not a cancellation
 engine for CPU work or an exactly enforced monetary budget. SDK internal retries remain
@@ -119,7 +119,7 @@ bounded separately. Default frontend wait is 180 seconds.
 
 Internal names, categories and source data stay canonical English. Chinese input uses
 English retrieval; the committed activity model remains separate from language rendering.
-`language.py` translates prose and display slot labels while retaining IDs, constraints,
+`conversation/language.py` translates prose and display slot labels while retaining IDs, constraints,
 prices, dates, enums, URLs and original evidence. Compatibility day text is regenerated
 from translated activities. Translations never become the baseline for the next revision.
 

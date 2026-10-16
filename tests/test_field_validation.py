@@ -2,8 +2,8 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from backend.app.field_validation import normalize_trip_length
-from backend.app.models import ChatRequest, StrategyDecision
+from backend.app.domain.field_validation import normalize_trip_length
+from backend.app.domain.models import ChatRequest, StrategyDecision
 
 
 @pytest.mark.parametrize("value", [3, "3", "3 days", "3 day", "3天", "三天", "三日游", " 3 DAYS "])
@@ -27,12 +27,12 @@ def test_llm_known_fields_cannot_overwrite_day_count_with_unparsed_string():
 
 
 def test_chat_api_handles_llm_string_days(monkeypatch, tmp_path):
-    import backend.app.chat as chat
+    import backend.app.conversation.chat as chat
     from backend.app.main import app
-    import backend.app.strategy as strategy
-    from backend.app.llm import LLMResult
-    from backend.app.fixed_itinerary import FixedItineraryResult
-    from backend.app.models import TripPlan
+    import backend.app.conversation.strategy as strategy
+    from backend.app.llm.llm import LLMResult
+    from backend.app.legacy.fixed_itinerary import FixedItineraryResult
+    from backend.app.domain.models import TripPlan
 
     monkeypatch.setenv("TRAJECTORY_DIR", str(tmp_path))
     monkeypatch.setenv("LLM_PROVIDER", "openai")
@@ -40,7 +40,7 @@ def test_chat_api_handles_llm_string_days(monkeypatch, tmp_path):
     monkeypatch.setattr(strategy, "generate_text", lambda *a, **k: LLMResult(
         text='{"intent":"plan_fixed_destination","next_action":"run_fixed_itinerary","known_fields":{"trip_length":"3 days"}}',
         model="test", provider="openai", usage=None, request_id=None))
-    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", lambda *a, **k: [])
+    monkeypatch.setattr("backend.app.rag.knowledge.search_travel_knowledge", lambda *a, **k: [])
     with TestClient(app) as client:
         response = client.post("/chat", json={"message": "3 days in Paris"})
     assert response.status_code == 200
@@ -48,8 +48,8 @@ def test_chat_api_handles_llm_string_days(monkeypatch, tmp_path):
 
 
 def test_invalid_llm_days_trigger_rule_fallback(monkeypatch):
-    import backend.app.strategy as strategy
-    from backend.app.llm import LLMResult
+    import backend.app.conversation.strategy as strategy
+    from backend.app.llm.llm import LLMResult
     monkeypatch.setenv("LLM_PROVIDER", "openai")
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test-fake")
     monkeypatch.setattr(strategy, "generate_text", lambda *a, **k: LLMResult(

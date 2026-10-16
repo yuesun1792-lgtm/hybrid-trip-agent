@@ -35,19 +35,19 @@ This is one phase. Implement all of it, then verify against the acceptance crite
 
 ### Retrieval (on the request path)
 
-- `backend/app/knowledge.py` — loads the saved index at startup and exposes:
+- `backend/app/rag/knowledge.py` — loads the saved index at startup and exposes:
   `search_travel_knowledge(query: str, k: int = 5, destination: str | None = None) -> list[dict]`
   → embed the query, cosine-rank against stored vectors, optional filter by destination,
   return top-k chunks with their metadata. **This is the only file that changes if you swap to Chroma.**
 
-- `backend/app/tools.py` — add `SEARCH_TRAVEL_KNOWLEDGE_SCHEMA` to `TOOL_SCHEMAS`; wire
+- `backend/app/tool_calling/tools.py` — add `SEARCH_TRAVEL_KNOWLEDGE_SCHEMA` to `TOOL_SCHEMAS`; wire
   `"search_travel_knowledge"` into `dispatch_tool`.
 
-- `backend/app/prompts.py` — system prompt tells the agent it can search travel knowledge to
+- `backend/app/llm/prompts.py` — system prompt tells the agent it can search travel knowledge to
   ground its recommendations (season, safety, food, hikes, etc.), and to prefer retrieved facts
   over its own memory.
 
-- `backend/app/agent.py` — **loop unchanged.** The retrieval tool slots into the existing V3 loop.
+- `backend/app/legacy/agent.py` — **loop unchanged.** The retrieval tool slots into the existing V3 loop.
 
 - `requirements.txt` — add `sentence-transformers`, `numpy`, `requests` (or `httpx`) if not present.
 

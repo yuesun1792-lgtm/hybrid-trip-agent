@@ -28,27 +28,26 @@ assertions, reports, repeat runs and automation exit codes.
 
 ```text
 backend/app/
-  planning_models.py       # Constraints, task, Day, Activity and revision contracts
-  task_builder.py          # Chat/form -> validated planning task
-  unified_planner.py       # Shared controlled scheduler
-  destination_analysis.py  # Overview and detailed analysis of one destination
-  plan_builder.py          # Selected/affected days -> structured activities
-  revision.py              # Interpret, scope and merge revisions
-  plan_validation.py       # Business validation and explicit uncertainty
-  plan_store.py            # Versioned repository interface and in-memory adapter
-  plan_renderer.py         # Activity objects -> compatibility day prose
-  tool_executor.py         # Registered typed read-only tools
-  execution.py             # Per-run deadline and admission budgets
-  llm.py                   # OpenAI Responses / Anthropic text adapter
-  knowledge.py             # English retrieval index
-  language.py              # User language and presentation translation
-  trajectory.py            # JSON/JSONL run records
-  chat.py / main.py         # API adapters and conversation handling
-frontend/streamlit_app.py   # Chat and structured activity display
+  main.py          # FastAPI entry point
+  config.py        # Shared configuration and project paths
+  conversation/    # Chat, state, intent routing and language
+  domain/          # Shared schemas, normalization and destination names
+  planning/        # Current planning workflow, revision, validation and storage
+  rag/             # Retrieval, reranking and discovery research
+  tool_calling/    # Tool implementations, schemas and execution
+  places/          # Place resolution, Geoapify and MCP client/server
+  llm/             # Model adapters, token usage and prompts
+  runtime/         # Execution budgets and trajectories
+  legacy/          # Earlier planners and compatibility adapters
+frontend/          # Streamlit UI and HTTP client
+scripts/           # Index building, evaluation and smoke-test entry points
+tests/             # Automated regression tests
 ```
 
-The legacy `agent.py` is unchanged and Anthropic-only; HTTP endpoints use the unified
+The legacy `legacy/agent.py` is Anthropic-only; its behavior is unchanged; HTTP endpoints use the unified
 scheduler. Former fixed/ranked builders are compatibility adapters.
+
+See [directory organization](docs/directory_structure.md) for classification rules and the complete module map.
 
 ## Setup and run
 

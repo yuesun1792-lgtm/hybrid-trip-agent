@@ -15,13 +15,13 @@ def main():
     from dotenv import load_dotenv
     load_dotenv()
     import os
-    from backend.app.trajectory import clean, error_details, Trajectory, _CURRENT
-    from backend.app.places_mcp_client import places_session
-    from backend.app.execution import RUN_CONTEXT, RunContext
-    from backend.app.models import ChatResponse, TripPlan, ItineraryDay, ExecutionTraceStep
-    from backend.app.planning_models import Activity
+    from backend.app.runtime.trajectory import clean, error_details, Trajectory, _CURRENT
+    from backend.app.places.places_mcp_client import places_session
+    from backend.app.runtime.execution import RUN_CONTEXT, RunContext
+    from backend.app.domain.models import ChatResponse, TripPlan, ItineraryDay, ExecutionTraceStep
+    from backend.app.domain.planning_models import Activity
     if args.diagnose_network:
-        from backend.app.place_provider import GeoapifyPlaces
+        from backend.app.places.place_provider import GeoapifyPlaces
         result = GeoapifyPlaces().check_connection()
         print(json.dumps(clean(result), ensure_ascii=False, indent=2))
         return 0 if result["reachable"] else 1
@@ -53,7 +53,7 @@ def main():
     budget_token = RUN_CONTEXT.set(RunContext())
     try:
         if args.resolve and not args.discover:
-            from backend.app.place_resolution import resolve_plan_places
+            from backend.app.places.place_resolution import resolve_plan_places
             from unittest.mock import patch
             seed = TripPlan(ranked_destinations=[], itinerary=[ItineraryDay(day=1, destination=args.city,
                 activities=[Activity(title=args.query, description="Visit this named place.", status="proposed")])],

@@ -8,15 +8,15 @@ import ssl
 import httpx
 import pytest
 
-from backend.app import llm
-from backend.app.execution import RUN_CONTEXT, RunContext
-from backend.app.models import TripPlan, ItineraryDay
-from backend.app.planning_models import Activity
-from backend.app.place_models import Place, PlaceToolResult
-from backend.app.place_provider import GeoapifyPlaces
-from backend.app.place_resolution import resolve_plan_places
-from backend.app.places_mcp_client import PlacesMCPClient, places_session
-from backend.app.places_mcp_server import create_server
+from backend.app.llm import llm
+from backend.app.runtime.execution import RUN_CONTEXT, RunContext
+from backend.app.domain.models import TripPlan, ItineraryDay
+from backend.app.domain.planning_models import Activity
+from backend.app.domain.place_models import Place, PlaceToolResult
+from backend.app.places.place_provider import GeoapifyPlaces
+from backend.app.places.place_resolution import resolve_plan_places
+from backend.app.places.places_mcp_client import PlacesMCPClient, places_session
+from backend.app.places.places_mcp_server import create_server
 
 
 def props(city="Paris", identity="abc"):
@@ -133,7 +133,7 @@ def install_turns(monkeypatch, target, *, selected="geoapify:abc", repeated=Fals
         llm.ModelTurn("", [llm.ToolCall("d1", "get_place_details", {"place_id": "geoapify:abc"})], [], "anthropic"),
         llm.ModelTurn(json.dumps({"activities": [{"activity_id": target.activity_id, "status": "resolved",
             "place_ids": [selected], "reason": "Named venue and city match."}]}), [], [], "anthropic")])
-    monkeypatch.setattr("backend.app.place_resolution.generate_tool_turn", lambda *a, **k: next(turns))
+    monkeypatch.setattr("backend.app.places.place_resolution.generate_tool_turn", lambda *a, **k: next(turns))
 
 
 def factory(client):
@@ -187,7 +187,7 @@ def test_unknown_detail_id_is_rejected_before_mcp(enabled, monkeypatch):
     turns = iter([llm.ModelTurn("", [llm.ToolCall("d", "get_place_details", {"place_id": "geoapify:fake"})], [], "anthropic"),
         llm.ModelTurn(json.dumps({"activities": [{"activity_id": original.itinerary[0].activities[0].activity_id,
             "status": "not_found", "place_ids": [], "reason": "No match"}]}), [], [], "anthropic")])
-    monkeypatch.setattr("backend.app.place_resolution.generate_tool_turn", lambda *a, **k: next(turns))
+    monkeypatch.setattr("backend.app.places.place_resolution.generate_tool_turn", lambda *a, **k: next(turns))
     client = FakeMCP()
     result = resolve_plan_places(original, session_factory=factory(client))
     assert not client.calls and not result.itinerary[0].activities[0].places
@@ -207,7 +207,7 @@ def test_ambiguous_result_stays_unresolved_without_queries(enabled, monkeypatch)
     original = seed()
     target = original.itinerary[0].activities[0]
     response = {"activities": [{"activity_id": target.activity_id, "status": "ambiguous", "place_ids": [], "reason": "Multiple plausible venues."}]}
-    monkeypatch.setattr("backend.app.place_resolution.generate_tool_turn", lambda *a, **k:
+    monkeypatch.setattr("backend.app.places.place_resolution.generate_tool_turn", lambda *a, **k:
         llm.ModelTurn(json.dumps(response), [], [], "anthropic"))
     client = FakeMCP()
     result = resolve_plan_places(original, session_factory=factory(client))
@@ -238,27 +238,27 @@ def test_network_error_classification_never_leaks_urls_or_keys(enabled, cause, c
 
 
 def test_explicit_proxy_and_ca_are_independent_of_trust_env(monkeypatch):
-    from backend.app.place_provider import places_http_client
+    from backend.app.places.place_provider import places_http_client
     monkeypatch.setenv("PLACES_TRUST_ENV", "false")
     monkeypatch.setenv("PLACES_PROXY_URL", "http://localhost:7890")
     monkeypatch.setenv("PLACES_CA_BUNDLE", "/trusted.pem")
     ca = object()
-    monkeypatch.setattr("backend.app.place_provider.ssl.create_default_context", lambda **kw: ca)
-    monkeypatch.setattr("backend.app.place_provider.httpx.Client", lambda **kw: kw)
+    monkeypatch.setattr("backend.app.places.place_provider.ssl.create_default_context", lambda **kw: ca)
+    monkeypatch.setattr("backend.app.places.place_provider.httpx.Client", lambda **kw: kw)
     options = places_http_client()
     assert options["trust_env"] is False and options["proxy"] == "http://localhost:7890"
     assert options["verify"] is ca
 
 
 def test_mcp_child_receives_system_proxy_and_no_model_keys(monkeypatch):
-    from backend.app.places_mcp_client import places_server_environment
+    from backend.app.places.places_mcp_client import places_server_environment
     for key in ["HTTPS_PROXY", "https_proxy", "PLACES_PROXY_URL", "NO_PROXY", "no_proxy"]:
         monkeypatch.delenv(key, raising=False)
     monkeypatch.setenv("PLACES_TRUST_ENV", "true")
     monkeypatch.setenv("OPENAI_API_KEY", "must-not-pass")
     monkeypatch.setenv("ALL_PROXY", "http://localhost:7890")
     monkeypatch.setenv("https_proxy", "")
-    monkeypatch.setattr("backend.app.places_mcp_client.getproxies", lambda: {"https": "http://localhost:7890", "no": "localhost"})
+    monkeypatch.setattr("backend.app.places.places_mcp_client.getproxies", lambda: {"https": "http://localhost:7890", "no": "localhost"})
     env = places_server_environment()
     assert env["HTTPS_PROXY"] == "http://localhost:7890"
     assert env["ALL_PROXY"] == "http://localhost:7890" and env["NO_PROXY"] == "localhost"
@@ -311,8 +311,8 @@ def test_only_new_activity_is_resolved_during_revision(enabled, monkeypatch):
 
 def test_complete_node_with_real_mcp_and_mocked_provider_http(enabled, monkeypatch, tmp_path):
     from mcp.shared.memory import create_connected_server_and_client_session
-    from backend.app.trajectory import Trajectory, _CURRENT
-    from backend.app.models import ChatResponse
+    from backend.app.runtime.trajectory import Trajectory, _CURRENT
+    from backend.app.domain.models import ChatResponse
     original = seed()
     install_turns(monkeypatch, original.itinerary[0].activities[0])
     provider = GeoapifyPlaces(httpx.Client(transport=httpx.MockTransport(
@@ -343,7 +343,7 @@ def test_complete_node_with_real_mcp_and_mocked_provider_http(enabled, monkeypat
 
 
 def test_plan_validation_rejects_place_from_other_city():
-    from backend.app.plan_validation import validate_plan, PlanValidationError
+    from backend.app.planning.plan_validation import validate_plan, PlanValidationError
     current = seed()
     activity = current.itinerary[0].activities[0]
     activity.places = [place("Rome")]

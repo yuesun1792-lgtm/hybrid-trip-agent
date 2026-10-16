@@ -14,13 +14,13 @@ python -m scripts.test_places --resolve --city Paris --query 'Louvre Museum'
 | 顺序 | 动作 | 代码 |
 |---|---|---|
 | 1 | 脚本创建带稳定 ID 的测试活动 | `scripts/test_places.py` |
-| 2 | 节点发现 MCP 工具，向模型提供 schema | `place_resolution.py`、`places_mcp_client.py` |
+| 2 | 节点发现 MCP 工具，向模型提供 schema | `places/place_resolution.py`、`places/places_mcp_client.py` |
 | 3 | 第一轮模型选择 `search_places(city=Paris, query=Louvre Museum, limit=5)` | `llm.generate_tool_turn` |
 | 4 | 程序校验后，经 MCP 查询 Geoapify | client → server → provider |
 | 5 | 第二轮模型使用搜索结果 ID 请求 `get_place_details` | `llm.generate_tool_turn` |
-| 6 | 程序查询并返回真实地点记录 | `places_mcp_client.py`、`place_provider.py` |
+| 6 | 程序查询并返回真实地点记录 | `places/places_mcp_client.py`、`places/place_provider.py` |
 | 7 | 第三轮模型返回活动与地点的选择关系 | `ResolutionDraft` |
-| 8 | 程序校验选择，把工具记录中的坐标附加到活动 | `place_resolution.py` |
+| 8 | 程序校验选择，把工具记录中的坐标附加到活动 | `places/place_resolution.py` |
 
 实际坐标是 `48.8611473, 2.3380277`，返回名称为 `Musée du Louvre`。搜索 ID 与
 详情规范 ID 可以不同，通过 `requested_place_id` 关联，而非要求字符串完全相等。
@@ -82,21 +82,21 @@ MCP 客户端和服务端都是我们的进程；Geoapify 是服务端调用的 
 
 ## 按这个顺序读代码
 
-下列后端模块均位于 `backend/app/`：
+下列后端模块按职责分布在 `backend/app/` 子包中，完整位置见 [目录分类说明](directory_structure.md)：
 
 | 顺序 | 模块 | 要理解的问题 |
 |---|---|---|
-| 1 | `chat.py`、`strategy.py`、`task_builder.py` | 输入怎样变成创建/修改任务，缺字段怎样澄清？ |
-| 2 | `planning_models.py`、`models.py` | 活动、地点、证据、任务分别保存什么？ |
-| 3 | `unified_planner.py` | 为什么候选做概要，选中城市才生成每日活动？ |
-| 4 | `destination_analysis.py`、`knowledge.py` | 检索了什么，证据怎样传给下游？ |
-| 5 | `plan_builder.py` | 哪些内容由模型生成，哪些数值只能来自工具？ |
-| 6 | `place_resolution.py` | 模型怎样循环，怎样限制范围和次数？ |
-| 7 | `llm.py` | 怎样适配两家模型 API、保留 call ID 和返回工具结果？ |
-| 8 | `places_mcp_client.py` | 怎样启动会话、发现并调用工具？ |
-| 9 | `places_mcp_server.py`、`place_provider.py` | 工具怎样映射为真实 HTTP 查询？ |
-| 10 | `revision.py`、`plan_validation.py`、`plan_store.py` | 什么能改、什么保留、何时提交？ |
-| 11 | `trajectory.py`、`execution.py` | 轨迹记录什么，预算在哪里生效？ |
+| 1 | `conversation/chat.py`、`conversation/strategy.py`、`planning/task_builder.py` | 输入怎样变成创建/修改任务，缺字段怎样澄清？ |
+| 2 | `domain/planning_models.py`、`domain/models.py` | 活动、地点、证据、任务分别保存什么？ |
+| 3 | `planning/unified_planner.py` | 为什么候选做概要，选中城市才生成每日活动？ |
+| 4 | `planning/destination_analysis.py`、`rag/knowledge.py` | 检索了什么，证据怎样传给下游？ |
+| 5 | `planning/plan_builder.py` | 哪些内容由模型生成，哪些数值只能来自工具？ |
+| 6 | `places/place_resolution.py` | 模型怎样循环，怎样限制范围和次数？ |
+| 7 | `llm/llm.py` | 怎样适配两家模型 API、保留 call ID 和返回工具结果？ |
+| 8 | `places/places_mcp_client.py` | 怎样启动会话、发现并调用工具？ |
+| 9 | `places/places_mcp_server.py`、`places/place_provider.py` | 工具怎样映射为真实 HTTP 查询？ |
+| 10 | `planning/revision.py`、`planning/plan_validation.py`、`planning/plan_store.py` | 什么能改、什么保留、何时提交？ |
+| 11 | `runtime/trajectory.py`、`runtime/execution.py` | 轨迹记录什么，预算在哪里生效？ |
 
 ## 用轨迹回答问题
 

@@ -11,7 +11,7 @@ def isolated_runtime(monkeypatch, tmp_path):
     monkeypatch.setenv("ENABLE_PLACE_RESOLUTION", "false")
     monkeypatch.setenv("GEOAPIFY_API_KEY", "")
     monkeypatch.setenv("TRAJECTORY_DIR", str(tmp_path / "trajectories"))
-    from backend.app import knowledge
+    from backend.app.rag import knowledge
     def no_embedding_download():
         raise RuntimeError("Use injected embeddings or lexical fallback in unit tests")
     monkeypatch.setattr(knowledge, "_get_model", no_embedding_download)

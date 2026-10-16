@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from backend.app.knowledge import search_travel_knowledge
+from backend.app.rag.knowledge import search_travel_knowledge
 
 # (query, expected_destination, difficulty, note)
 EVAL_CASES = [

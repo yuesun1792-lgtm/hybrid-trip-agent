@@ -4,23 +4,23 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from backend.app.explainer import _fallback_explanation, generate_explanation
-from backend.app.models import CandidateDestination, EvidenceChunk, ToolInsight, TripRequest
-from backend.app.planner import create_trip_plan, score_destination
-from backend.app.currency_tool import convert_currency
-from backend.app.planning_engine import deterministic_plan_from_state, state_from_request
-from backend.app.rag_enhancements import ResearchDecision
-from backend.app.candidate_discovery import (
+from backend.app.legacy.explainer import _fallback_explanation, generate_explanation
+from backend.app.domain.models import CandidateDestination, EvidenceChunk, ToolInsight, TripRequest
+from backend.app.legacy.planner import create_trip_plan, score_destination
+from backend.app.tool_calling.currency_tool import convert_currency
+from backend.app.planning.planning_engine import deterministic_plan_from_state, state_from_request
+from backend.app.rag.rag_enhancements import ResearchDecision
+from backend.app.rag.candidate_discovery import (
     build_discovery_queries,
     discover_candidate_destinations,
 )
-from backend.app.candidate_ranker import rank_candidate_destinations, score_candidate
-from backend.app.rag_plan_builder import build_trip_plan_from_ranked_state
-from backend.app.costs import estimate_trip_cost, normalize_plan_costs
-from backend.app.chat import extract_fields, handle_chat, missing_fields
-from backend.app.models import ChatRequest
-from backend.app.strategy import decide_strategy
-from backend.app.tools import (
+from backend.app.legacy.candidate_ranker import rank_candidate_destinations, score_candidate
+from backend.app.legacy.rag_plan_builder import build_trip_plan_from_ranked_state
+from backend.app.planning.costs import estimate_trip_cost, normalize_plan_costs
+from backend.app.conversation.chat import extract_fields, handle_chat, missing_fields
+from backend.app.domain.models import ChatRequest
+from backend.app.conversation.strategy import decide_strategy
+from backend.app.tool_calling.tools import (
     check_budget_fit,
     dispatch_tool,
     get_destination_details,
@@ -187,7 +187,7 @@ def test_discover_candidate_destinations_groups_rag_evidence(monkeypatch):
     ]
 
     monkeypatch.setattr(
-        "backend.app.candidate_discovery.search_travel_knowledge",
+        "backend.app.rag.candidate_discovery.search_travel_knowledge",
         lambda query, k=6: fake_results,
     )
     discovered = discover_candidate_destinations(state)
@@ -226,7 +226,7 @@ def test_score_candidate_adds_breakdown(monkeypatch):
         ],
     )
     monkeypatch.setattr(
-        "backend.app.candidate_ranker.estimate_transport_time",
+        "backend.app.legacy.candidate_ranker.estimate_transport_time",
         lambda origin, destination: {"hours": 2.0, "mode": "train"},
     )
     scored = score_candidate(candidate, state, {"Salzburg": 150})
@@ -275,7 +275,7 @@ def test_rank_candidate_destinations_orders_by_constraints(monkeypatch):
         }
     )
     monkeypatch.setattr(
-        "backend.app.candidate_ranker.estimate_transport_time",
+        "backend.app.legacy.candidate_ranker.estimate_transport_time",
         lambda origin, destination: {
             "Lisbon": {"hours": 3.0, "mode": "flight"},
             "Salzburg": {"hours": 2.0, "mode": "train"},
@@ -317,7 +317,7 @@ def test_rank_candidate_destinations_filters_over_budget_when_matches_exist(monk
         }
     )
     monkeypatch.setattr(
-        "backend.app.candidate_ranker.estimate_transport_time",
+        "backend.app.legacy.candidate_ranker.estimate_transport_time",
         lambda origin, destination: {"hours": 2.0, "mode": "bus"},
     )
     ranked = rank_candidate_destinations(state)
@@ -362,7 +362,7 @@ def test_build_trip_plan_from_ranked_state_uses_candidates(monkeypatch):
         }
     )
     monkeypatch.setattr(
-        "backend.app.tools.gather_tool_insights",
+        "backend.app.tool_calling.tools.gather_tool_insights",
         lambda origin, destination, date_range, trip_length: ToolInsight(
             transport_hours=2,
             transport_mode="train",
@@ -408,7 +408,7 @@ def test_build_trip_plan_from_ranked_state_scales_cost_to_trip_length(monkeypatc
         }
     )
     monkeypatch.setattr(
-        "backend.app.tools.gather_tool_insights",
+        "backend.app.tool_calling.tools.gather_tool_insights",
         lambda origin, destination, date_range, trip_length: ToolInsight(
             transport_hours=2,
             transport_mode="bus",
@@ -533,7 +533,7 @@ def test_chat_asks_for_missing_fields():
 
 def test_chat_routes_fixed_destination_plan(monkeypatch):
     monkeypatch.setattr(
-        "backend.app.knowledge.search_travel_knowledge",
+        "backend.app.rag.knowledge.search_travel_knowledge",
         lambda query, k=6, destination=None: [
             {
                 "text": "Paris - See\nMuseums, neighborhoods, and riverside walks.",
@@ -552,11 +552,11 @@ def test_chat_routes_fixed_destination_plan(monkeypatch):
 
 
 def test_chat_generates_plan_when_fields_complete(monkeypatch):
-    import backend.app.chat as chat_module
+    import backend.app.conversation.chat as chat_module
     request = ChatRequest(
         message="2 days from Munich in July, budget 400, food history nature, bus, medium"
     )
-    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", lambda *a, **k: [
+    monkeypatch.setattr("backend.app.rag.knowledge.search_travel_knowledge", lambda *a, **k: [
         {"text": "Prague - See\nParks, museums and walks offer local activities.", "destination": "Prague", "section": "See", "url": "https://en.wikivoyage.org/wiki/Prague", "score": .9}])
     response = handle_chat(request)
     assert response.plan is not None
@@ -619,9 +619,9 @@ def test_dispatch_tool_convert_currency(monkeypatch):
     def fake_convert(amount, from_currency, to_currency):
         return fake_response
 
-    monkeypatch.setattr("backend.app.currency_tool.convert_currency", fake_convert)
+    monkeypatch.setattr("backend.app.tool_calling.currency_tool.convert_currency", fake_convert)
     # Re-import so tools.py picks up the patched reference
-    import importlib, backend.app.tools as tools_mod
+    import importlib, backend.app.tool_calling.tools as tools_mod
     monkeypatch.setattr(tools_mod, "convert_currency", fake_convert)
 
     result = dispatch_tool("convert_currency", {"amount": 100, "from_currency": "EUR", "to_currency": "USD"})
@@ -653,7 +653,7 @@ def test_convert_currency_success(monkeypatch):
     """Success path: urlopen returns valid ECB payload → correct converted amount."""
     payload = {"date": "2024-06-01", "rates": {"USD": 1.08}}
 
-    with patch("backend.app.currency_tool.urllib.request.urlopen", return_value=_make_urlopen_mock(payload)):
+    with patch("backend.app.tool_calling.currency_tool.urllib.request.urlopen", return_value=_make_urlopen_mock(payload)):
         result = convert_currency(100.0, "EUR", "USD")
 
     assert result["converted"] == 108.0
@@ -666,7 +666,7 @@ def test_convert_currency_success(monkeypatch):
 def test_convert_currency_network_failure(monkeypatch):
     """Network failure → returns error dict, does not raise."""
     import urllib.error
-    with patch("backend.app.currency_tool.urllib.request.urlopen",
+    with patch("backend.app.tool_calling.currency_tool.urllib.request.urlopen",
                side_effect=urllib.error.URLError("timeout")):
         result = convert_currency(100.0, "EUR", "GBP")
 
@@ -793,7 +793,7 @@ def test_create_plan_mocked_loop_succeeds(monkeypatch):
     mock_client = MagicMock()
     mock_client.messages.create = mock_create
 
-    import backend.app.agent as agent_module
+    import backend.app.legacy.agent as agent_module
     request = TripRequest(
         origin_city="Munich", date_range="June 10-15", trip_length=4,
         budget=700, interests=["food", "history"],
@@ -818,7 +818,7 @@ def test_create_plan_fallback_when_no_submit(monkeypatch):
     mock_client = MagicMock()
     mock_client.messages.create = mock_create
 
-    import backend.app.agent as agent_module
+    import backend.app.legacy.agent as agent_module
     request = TripRequest(
         origin_city="Munich", date_range="June 10-15", trip_length=4,
         budget=700, interests=["food", "history"],
@@ -848,7 +848,7 @@ def test_create_plan_recovers_from_max_tokens(monkeypatch):
     mock_client = MagicMock()
     mock_client.messages.create = mock_create
 
-    import backend.app.agent as agent_module
+    import backend.app.legacy.agent as agent_module
     request = TripRequest(
         origin_city="Munich", date_range="June 10-15", trip_length=4,
         budget=700, interests=["food", "history"],
@@ -885,7 +885,7 @@ def test_trip_request_home_currency_custom():
 
 
 def test_destination_suggestion_accepts_home_currency_fields():
-    from backend.app.models import DestinationSuggestion
+    from backend.app.domain.models import DestinationSuggestion
     dest = DestinationSuggestion(
         name="Lisbon", country="Portugal", score=10,
         pros=["Food"], cons=["Hilly"], estimated_cost=650,
@@ -896,7 +896,7 @@ def test_destination_suggestion_accepts_home_currency_fields():
 
 
 def test_destination_suggestion_home_currency_fields_optional():
-    from backend.app.models import DestinationSuggestion
+    from backend.app.domain.models import DestinationSuggestion
     dest = DestinationSuggestion(
         name="Prague", country="Czechia", score=8,
         pros=["Cheap"], cons=["Touristy"], estimated_cost=520,
@@ -941,14 +941,14 @@ def test_create_plan_calls_convert_currency_for_non_eur(monkeypatch):
     mock_client = MagicMock()
     mock_client.messages.create = mock_create
 
-    import backend.app.agent as agent_module
-    import backend.app.currency_tool as ct_mod
+    import backend.app.legacy.agent as agent_module
+    import backend.app.tool_calling.currency_tool as ct_mod
     # Stub convert_currency so no real network call happens
     monkeypatch.setattr(ct_mod, "convert_currency",
                         lambda amount, from_currency, to_currency:
                         {"amount": amount, "from": from_currency, "to": to_currency,
                          "rate": 6.5, "converted": round(amount * 6.5, 2), "date": "2024-01-01"})
-    import backend.app.tools as tools_mod
+    import backend.app.tool_calling.tools as tools_mod
     monkeypatch.setattr(tools_mod, "convert_currency",
                         lambda amount, from_currency, to_currency:
                         {"amount": amount, "from": from_currency, "to": to_currency,
@@ -1019,14 +1019,14 @@ def test_plan_trip_without_key_still_uses_shared_planner(monkeypatch):
 
 
 def test_build_agent_system_prompt_eur_skips_conversion():
-    from backend.app.prompts import build_agent_system_prompt
+    from backend.app.llm.prompts import build_agent_system_prompt
     prompt = build_agent_system_prompt("EUR")
     assert "no currency conversion" in prompt
     assert "convert_currency" not in prompt.split("convert_currency")[1] if "convert_currency" in prompt else True
 
 
 def test_build_agent_system_prompt_cny_includes_instruction():
-    from backend.app.prompts import build_agent_system_prompt
+    from backend.app.llm.prompts import build_agent_system_prompt
     prompt = build_agent_system_prompt("CNY")
     assert "CNY" in prompt
     assert "convert_currency" in prompt
@@ -1133,7 +1133,7 @@ _FIXTURE_METADATA = [
 
 def _inject_fixture_index(monkeypatch):
     """Patch knowledge._index and _embed_query so no model or file is loaded."""
-    import backend.app.knowledge as km
+    import backend.app.rag.knowledge as km
     monkeypatch.setattr(km, "_index", {
         "embeddings": _FIXTURE_EMBEDDINGS.copy(),
         "texts":      _FIXTURE_TEXTS[:],
@@ -1146,7 +1146,7 @@ def _inject_fixture_index(monkeypatch):
 
 def test_search_travel_knowledge_returns_results(monkeypatch):
     _inject_fixture_index(monkeypatch)
-    from backend.app.knowledge import search_travel_knowledge
+    from backend.app.rag.knowledge import search_travel_knowledge
     results = search_travel_knowledge("is Lisbon safe at night")
     assert len(results) > 0
     assert results[0]["destination"] == "Lisbon"
@@ -1155,7 +1155,7 @@ def test_search_travel_knowledge_returns_results(monkeypatch):
 
 def test_search_travel_knowledge_result_schema(monkeypatch):
     _inject_fixture_index(monkeypatch)
-    from backend.app.knowledge import search_travel_knowledge
+    from backend.app.rag.knowledge import search_travel_knowledge
     for r in search_travel_knowledge("Venice canal"):
         assert "text"        in r
         assert "score"       in r
@@ -1166,20 +1166,20 @@ def test_search_travel_knowledge_result_schema(monkeypatch):
 
 def test_search_travel_knowledge_destination_filter(monkeypatch):
     _inject_fixture_index(monkeypatch)
-    import backend.app.knowledge as km
+    import backend.app.rag.knowledge as km
     # Point query toward Venice chunk
     monkeypatch.setattr(km, "_embed_query",
                         lambda q: _FIXTURE_EMBEDDINGS[2].copy())
-    from backend.app.knowledge import search_travel_knowledge
+    from backend.app.rag.knowledge import search_travel_knowledge
     results = search_travel_knowledge("Venice canal", destination="Venice")
     assert all(r["destination"] == "Venice" for r in results)
 
 
 def test_search_travel_knowledge_no_index_returns_empty(monkeypatch):
-    import backend.app.knowledge as km
+    import backend.app.rag.knowledge as km
     monkeypatch.setattr(km, "_index", None)
     monkeypatch.setattr(km, "_load_index", lambda: None)
-    from backend.app.knowledge import search_travel_knowledge
+    from backend.app.rag.knowledge import search_travel_knowledge
     assert search_travel_knowledge("anything") == []
 
 
@@ -1196,7 +1196,7 @@ def test_dispatch_tool_search_travel_knowledge(monkeypatch):
 # ---------------------------------------------------------------------------
 
 def test_get_destination_budget_known():
-    from backend.app.tools import get_destination_budget
+    from backend.app.tool_calling.tools import get_destination_budget
     result = get_destination_budget("Prague")
     assert result["destination"] == "Prague"
     assert result["daily_cost_eur"] == 130
@@ -1206,14 +1206,14 @@ def test_get_destination_budget_known():
 
 
 def test_get_destination_budget_unknown():
-    from backend.app.tools import get_destination_budget
+    from backend.app.tool_calling.tools import get_destination_budget
     result = get_destination_budget("Atlantis")
     assert "error" in result
     assert result["destination"] == "Atlantis"
 
 
 def test_get_destination_budget_covers_all_22():
-    from backend.app.tools import get_destination_budget
+    from backend.app.tool_calling.tools import get_destination_budget
     destinations = [
         "Lisbon", "Porto", "Algarve", "Barcelona", "Seville", "Paris", "Nice",
         "Chamonix", "Provence", "Rome", "Venice", "Florence", "Cinque Terre",
@@ -1253,7 +1253,7 @@ def test_llm_rerank_reorders_by_score(monkeypatch):
     fake_client = MagicMock()
     fake_client.messages.create.return_value = fake_response
 
-    import backend.app.reranker as reranker_mod
+    import backend.app.rag.reranker as reranker_mod
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
     monkeypatch.setenv("LLM_PROVIDER", "anthropic")
     fake_response.text = fake_content.text
@@ -1276,16 +1276,16 @@ def test_llm_rerank_fallback_on_no_api_key(monkeypatch):
         {"text": "A", "score": 0.9, "destination": "Lisbon",  "section": "Eat", "url": ""},
         {"text": "B", "score": 0.8, "destination": "Prague",  "section": "Do",  "url": ""},
     ]
-    from backend.app.reranker import llm_rerank
+    from backend.app.rag.reranker import llm_rerank
     result = llm_rerank([dict(c) for c in candidates], "query", "profile", k=2)
     assert result[0]["destination"] == "Lisbon"
     assert len(result) == 2
 
 
 def test_research_loop_stops_at_configured_round_limit(monkeypatch):
-    import backend.app.unified_planner as engine
-    from backend.app.planning_models import PlanningTask, TripConstraints
-    from backend.app.llm import LLMResult
+    import backend.app.planning.unified_planner as engine
+    from backend.app.domain.planning_models import PlanningTask, TripConstraints
+    from backend.app.llm.llm import LLMResult
     calls = []
     monkeypatch.setattr(engine, "llm_rag_enhancements_enabled", lambda: True)
     monkeypatch.setattr(engine, "research_max_rounds", lambda: 3)
@@ -1296,7 +1296,7 @@ def test_research_loop_stops_at_configured_round_limit(monkeypatch):
     def propose(*args, **kwargs):
         decisions.append(len(decisions) + 1)
         return LLMResult(json.dumps({"queries": [f"query {len(decisions)}"]}), "test", "anthropic", None, None)
-    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", search)
+    monkeypatch.setattr("backend.app.rag.knowledge.search_travel_knowledge", search)
     monkeypatch.setattr(engine, "generate_text", propose)
     candidates = engine.resolve_candidates(PlanningTask(constraints=TripConstraints(trip_length=3, interests=["food"])))
     assert decisions == [1, 2]
@@ -1305,11 +1305,11 @@ def test_research_loop_stops_at_configured_round_limit(monkeypatch):
 
 
 def test_llm_research_failure_degrades_to_deterministic_rag(monkeypatch):
-    import backend.app.unified_planner as engine
-    from backend.app.planning_models import PlanningTask, TripConstraints
+    import backend.app.planning.unified_planner as engine
+    from backend.app.domain.planning_models import PlanningTask, TripConstraints
     monkeypatch.setattr(engine, "llm_rag_enhancements_enabled", lambda: True)
     monkeypatch.setattr(engine, "generate_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
-    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", lambda *a, **k: [
+    monkeypatch.setattr("backend.app.rag.knowledge.search_travel_knowledge", lambda *a, **k: [
         {"text": "Prague food markets", "destination": "Prague", "section": "Eat", "score": .9}])
     plan = engine.execute_task(PlanningTask(constraints=TripConstraints(trip_length=3, interests=["food"])))
     assert plan.planner_mode == "unified_itinerary_rule"
@@ -1317,13 +1317,13 @@ def test_llm_research_failure_degrades_to_deterministic_rag(monkeypatch):
 
 
 def test_no_key_path_uses_rag_backbone(monkeypatch):
-    import backend.app.unified_planner as engine
-    from backend.app.planning_models import PlanningTask, TripConstraints
+    import backend.app.planning.unified_planner as engine
+    from backend.app.domain.planning_models import PlanningTask, TripConstraints
     calls = []
     def search(query, k=6, destination=None):
         calls.append(destination)
         return [{"text": "Prague food markets", "destination": "Prague", "section": "Eat", "url": "https://en.wikivoyage.org/wiki/Prague", "score": .9}]
-    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", search)
+    monkeypatch.setattr("backend.app.rag.knowledge.search_travel_knowledge", search)
     plan = engine.execute_task(PlanningTask(constraints=TripConstraints(trip_length=3, interests=["food"])))
     assert None in calls and "Prague" in calls
     assert plan.planner_mode == "unified_itinerary_rule"
@@ -1331,7 +1331,7 @@ def test_no_key_path_uses_rag_backbone(monkeypatch):
 
 
 def test_generated_copy_rejects_unknown_evidence_ids(monkeypatch):
-    import backend.app.rag_enhancements as enhancements
+    import backend.app.rag.rag_enhancements as enhancements
 
     request = TripRequest(
         origin_city="Munich", date_range="June", trip_length=3, budget=700,
@@ -1372,7 +1372,7 @@ def test_dispatch_tool_rerank_travel_knowledge(monkeypatch):
     """dispatch_tool routes rerank_travel_knowledge; knowledge and reranker are monkeypatched."""
     _inject_fixture_index(monkeypatch)
 
-    import backend.app.reranker as reranker_mod
+    import backend.app.rag.reranker as reranker_mod
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
 
     fake_content = MagicMock()

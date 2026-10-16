@@ -5,14 +5,14 @@ from types import SimpleNamespace
 import httpx
 import pytest
 
-from backend.app import llm
-from backend.app.chat import handle_chat
+from backend.app.llm import llm
+from backend.app.conversation.chat import handle_chat
 from backend.app.config import llm_api_key, llm_rag_enhancements_enabled
-from backend.app.llm_usage import usage_from_response
-from backend.app.models import ChatRequest, EvidenceChunk
-from backend.app.rag_enhancements import _ask_json
-from backend.app.reranker import llm_rerank
-from backend.app.trajectory import Trajectory, _CURRENT
+from backend.app.llm.llm_usage import usage_from_response
+from backend.app.domain.models import ChatRequest, EvidenceChunk
+from backend.app.rag.rag_enhancements import _ask_json
+from backend.app.rag.reranker import llm_rerank
+from backend.app.runtime.trajectory import Trajectory, _CURRENT
 
 
 @pytest.fixture(autouse=True)
@@ -91,7 +91,7 @@ def test_two_turn_chat_uses_openai_for_router_and_writer(monkeypatch):
                    "category": "culture", "time_slot": "morning", "evidence_ids": [EvidenceChunk(text="Paris - See\nVisit museums and take a riverside walk.", destination="Paris", section="See", url="https://en.wikivoyage.org/wiki/Paris").evidence_id]}]} for i in range(1, 4)],
                    "pros": ["Culture"], "cons": [], "explanation": "Guide evidence"})]
     requests = mock_sdk(monkeypatch, replies)
-    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", lambda *a, **k: [{
+    monkeypatch.setattr("backend.app.rag.knowledge.search_travel_knowledge", lambda *a, **k: [{
         "text": "Paris - See\nVisit museums and take a riverside walk.", "destination": "Paris",
         "section": "See", "score": 0.9, "url": "https://en.wikivoyage.org/wiki/Paris"}])
     first = handle_chat(ChatRequest(message="Paris for food and art"))
@@ -200,9 +200,9 @@ def test_real_client_initialization_without_network(monkeypatch, provider):
 
 
 def test_itinerary_request_enforces_exact_days_and_allowed_evidence(monkeypatch):
-    from backend.app.plan_builder import build_itinerary
-    from backend.app.models import DestinationAnalysis, EvidenceChunk
-    from backend.app.planning_models import TripConstraints
+    from backend.app.planning.plan_builder import build_itinerary
+    from backend.app.domain.models import DestinationAnalysis, EvidenceChunk
+    from backend.app.domain.planning_models import TripConstraints
     chunk = EvidenceChunk(text="Paris - See\nMuseums and riverside walks.", destination="Paris", section="See", url="https://en.wikivoyage.org/wiki/Paris")
     replies = [json.dumps({"days": [{"day": i, "activities": [{"title": "Museum", "description": "Visit museums.", "category": "culture", "time_slot": "morning", "evidence_ids": [chunk.evidence_id]}]} for i in range(1, 4)],
                           "pros": [], "cons": [], "explanation": "Evidence-backed"})]
@@ -218,9 +218,9 @@ def test_itinerary_request_enforces_exact_days_and_allowed_evidence(monkeypatch)
 
 
 def test_extra_summary_items_are_still_rejected_by_local_validation(monkeypatch):
-    from backend.app.plan_builder import build_itinerary
-    from backend.app.models import DestinationAnalysis, EvidenceChunk
-    from backend.app.planning_models import TripConstraints
+    from backend.app.planning.plan_builder import build_itinerary
+    from backend.app.domain.models import DestinationAnalysis, EvidenceChunk
+    from backend.app.domain.planning_models import TripConstraints
     replies = [json.dumps({"days": ["Day 1", "Day 2", "Day 3", "Summary", "Strengths", "Caveats"],
                           "pros": [], "cons": [], "explanation": "Test"})]
     mock_sdk(monkeypatch, replies)

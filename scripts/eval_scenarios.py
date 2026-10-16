@@ -15,8 +15,8 @@ from uuid import uuid4
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from backend.app.models import ChatRequest, LLMUsage
-from backend.app.trajectory import clean, error_details
+from backend.app.domain.models import ChatRequest, LLMUsage
+from backend.app.runtime.trajectory import clean, error_details
 
 
 class StrictModel(BaseModel):
@@ -121,7 +121,7 @@ def runtime(mode):
                          "text": f"{city} - See\nMuseums, galleries, food markets, shops and riverside walks."}
                         for city in ([destination] if destination else ["Paris", "Rome", "Prague"])]
 
-            stack.enter_context(patch("backend.app.knowledge.search_travel_knowledge", search))
+            stack.enter_context(patch("backend.app.rag.knowledge.search_travel_knowledge", search))
         yield
 
 
@@ -217,8 +217,8 @@ def check_turn(expect, response, before, after, error=None, mode="live"):
 
 
 def run_suite(suite, output_dir, *, mode="offline", repeat=1, handler=None, snapshot=None):
-    from backend.app.chat import handle_chat
-    from backend.app.conversation_state import get_conversation
+    from backend.app.conversation.chat import handle_chat
+    from backend.app.conversation.conversation_state import get_conversation
     from backend.app.config import llm_model, llm_provider
 
     if mode not in {"offline", "live"} or repeat < 1:

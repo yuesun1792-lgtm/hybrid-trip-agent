@@ -3,14 +3,14 @@ from datetime import date
 
 import pytest
 
-from backend.app.execution import RUN_CONTEXT, RunContext, BudgetExceeded
-from backend.app.models import CandidateDestination, EvidenceChunk, ItineraryDay, TripPlan
-from backend.app.planning_models import Activity, PlanningTask, TripConstraints, RevisionRequest, RevisionChange
-from backend.app.plan_store import InMemoryPlanStore, PlanVersionConflict
-from backend.app.plan_validation import validate_plan, PlanValidationError
-from backend.app.task_builder import task_from_fields, PlanningNeedsInput
-from backend.app.unified_planner import execute_task
-from backend.app.llm import LLMResult
+from backend.app.runtime.execution import RUN_CONTEXT, RunContext, BudgetExceeded
+from backend.app.domain.models import CandidateDestination, EvidenceChunk, ItineraryDay, TripPlan
+from backend.app.domain.planning_models import Activity, PlanningTask, TripConstraints, RevisionRequest, RevisionChange
+from backend.app.planning.plan_store import InMemoryPlanStore, PlanVersionConflict
+from backend.app.planning.plan_validation import validate_plan, PlanValidationError
+from backend.app.planning.task_builder import task_from_fields, PlanningNeedsInput
+from backend.app.planning.unified_planner import execute_task
+from backend.app.llm.llm import LLMResult
 
 
 @pytest.fixture
@@ -27,7 +27,7 @@ def offline_tools(monkeypatch, evidence):
         names = [destination] if destination else ["Paris", "Rome", "Prague"]
         return [{"text": f"{name} - See\nMuseums, galleries, shops and riverside walks offer cultural activities throughout the city.",
                  "destination": name, "section": "See", "url": "https://en.wikivoyage.org/wiki/" + name, "score": .9} for name in names]
-    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", search)
+    monkeypatch.setattr("backend.app.rag.knowledge.search_travel_knowledge", search)
     return calls
 
 
@@ -53,7 +53,7 @@ def test_known_and_discovered_destinations_share_full_activity_builder(offline_t
 def test_options_do_not_generate_daily_itineraries(offline_tools, monkeypatch):
     def unexpected(*a, **k):
         raise AssertionError("Options must not invoke the full itinerary builder")
-    monkeypatch.setattr("backend.app.unified_planner.build_itinerary", unexpected)
+    monkeypatch.setattr("backend.app.planning.unified_planner.build_itinerary", unexpected)
     plan = execute_task(task(None, "options"), store=InMemoryPlanStore())
     assert plan.itinerary == []
     assert len(plan.ranked_destinations) == 3
@@ -66,18 +66,18 @@ def test_freeform_named_activity_requirements_reach_itinerary_writer(offline_too
     requested = task()
     requested.constraints.trip_length = 1
     requested.user_message = "Exactly two stops: Louvre Museum in the morning and Eiffel Tower in the afternoon."
-    monkeypatch.setattr("backend.app.plan_builder.llm_api_key", lambda: "offline-test")
+    monkeypatch.setattr("backend.app.planning.plan_builder.llm_api_key", lambda: "offline-test")
 
     def write(prompt, **kwargs):
         assert requested.user_message in prompt
-        from backend.app.models import EvidenceChunk
+        from backend.app.domain.models import EvidenceChunk
         ref = EvidenceChunk(text="Paris - See\nMuseums, galleries, shops and riverside walks offer cultural activities throughout the city.",
                             destination="Paris", section="See", url="https://en.wikivoyage.org/wiki/Paris").evidence_id
         return LLMResult(json.dumps({"days": [{"day": 1, "activities": [
             {"title": name, "description": "Visit the named stop.", "category": "culture", "time_slot": slot, "evidence_ids": [ref]}
             for name, slot in [("Louvre Museum", "morning"), ("Eiffel Tower", "afternoon")]]}]}), "test", "openai", None, None)
 
-    monkeypatch.setattr("backend.app.plan_builder.generate_text", write)
+    monkeypatch.setattr("backend.app.planning.plan_builder.generate_text", write)
     plan = execute_task(requested, store=InMemoryPlanStore())
     assert plan.planner_mode == "unified_itinerary_llm"
     assert [a.title for a in plan.itinerary[0].activities] == ["Louvre Museum", "Eiffel Tower"]
@@ -109,7 +109,7 @@ def test_local_replacement_schema_cannot_duplicate_protected_activity(offline_to
     prepared = task_from_fields(base.constraints.model_dump(), operation="revise", base_plan=base,
         supplied_revision=RevisionRequest(changes=[RevisionChange(day_numbers=[2], time_slot="afternoon",
             requirements="Visit Musee d'Orsay; keep the existing morning unchanged.")]))
-    monkeypatch.setattr("backend.app.plan_builder.llm_api_key", lambda: "offline-test")
+    monkeypatch.setattr("backend.app.planning.plan_builder.llm_api_key", lambda: "offline-test")
 
     def write(prompt, **kwargs):
         schema = kwargs["response_schema"]["properties"]["days"]["items"]["properties"]["activities"]
@@ -119,7 +119,7 @@ def test_local_replacement_schema_cannot_duplicate_protected_activity(offline_to
             "description": "Visit this museum.", "category": "culture", "time_slot": "afternoon",
             "evidence_ids": [ref]}]}]}), "test", "openai", None, None)
 
-    monkeypatch.setattr("backend.app.plan_builder.generate_text", write)
+    monkeypatch.setattr("backend.app.planning.plan_builder.generate_text", write)
     result = execute_task(prepared, base, store=store)
     assert len(result.itinerary[1].activities) == len(base.itinerary[1].activities)
     before = {a.activity_id: a for a in base.itinerary[1].activities if a.time_slot != "afternoon"}
@@ -132,7 +132,7 @@ def test_remove_and_relax_require_no_generation(offline_tools, monkeypatch):
     base = execute_task(task(), store=store)
     def unexpected(*a, **k):
         raise AssertionError("Removing activities does not need new generation")
-    monkeypatch.setattr("backend.app.unified_planner.build_itinerary", unexpected)
+    monkeypatch.setattr("backend.app.planning.unified_planner.build_itinerary", unexpected)
     change = RevisionRequest(changes=[RevisionChange(day_numbers=[2], action="relax")])
     prepared = task_from_fields(base.constraints.model_dump(), operation="revise", base_plan=base, supplied_revision=change)
     updated = execute_task(prepared, base, store=store)
@@ -202,7 +202,7 @@ def test_date_change_updates_all_days(offline_tools):
 
 
 def test_budget_admission_and_registry_prevent_unbounded_calls():
-    from backend.app.tool_executor import default_executor
+    from backend.app.tool_calling.tool_executor import default_executor
     context = RunContext(max_tool_calls=0)
     token = RUN_CONTEXT.set(context)
     try:
@@ -215,11 +215,11 @@ def test_budget_admission_and_registry_prevent_unbounded_calls():
 
 
 def test_full_generation_validates_per_activity_citations(monkeypatch, evidence):
-    from backend.app.plan_builder import build_itinerary
-    from backend.app.models import DestinationAnalysis
+    from backend.app.planning.plan_builder import build_itinerary
+    from backend.app.domain.models import DestinationAnalysis
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     raw = {"days": [{"day": 1, "activities": [{"title": "Museum", "description": "Visit", "category": "art", "time_slot": "morning", "evidence_ids": ["missing"]}]}], "pros": [], "cons": [], "explanation": ""}
-    monkeypatch.setattr("backend.app.plan_builder.generate_text", lambda *a, **k: LLMResult(json.dumps(raw), "test", "anthropic", None, None))
+    monkeypatch.setattr("backend.app.planning.plan_builder.generate_text", lambda *a, **k: LLMResult(json.dumps(raw), "test", "anthropic", None, None))
     result = build_itinerary(DestinationAnalysis(destination="Paris", depth="detailed", evidence=[evidence]), TripConstraints(trip_length=1))
     assert not result.llm_used and result.fallback_reason
     assert all(a.status == "needs_verification" for a in result.days[0].activities)
@@ -244,9 +244,9 @@ def test_failed_validation_does_not_commit_draft(offline_tools, monkeypatch):
     prepared = task_from_fields(base.constraints.model_dump(), operation="revise", base_plan=base,
         supplied_revision=RevisionRequest(changes=[RevisionChange(day_numbers=[2], action="relax")]))
     def reject(*a, **k):
-        from backend.app.planning_models import ValidationIssue
+        from backend.app.domain.planning_models import ValidationIssue
         raise PlanValidationError([ValidationIssue(code="test", severity="error", message="Rejected draft")])
-    monkeypatch.setattr("backend.app.unified_planner.validate_plan", reject)
+    monkeypatch.setattr("backend.app.planning.unified_planner.validate_plan", reject)
     with pytest.raises(PlanValidationError):
         execute_task(prepared, base, store=store)
     assert store.latest(base.plan_id) == base
@@ -272,8 +272,8 @@ def test_chat_version_conflict_and_local_revision_api(offline_tools):
 
 
 def test_ambiguous_revision_waits_then_resumes_original_request(offline_tools):
-    from backend.app.chat import handle_chat
-    from backend.app.models import ChatRequest
+    from backend.app.conversation.chat import handle_chat
+    from backend.app.domain.models import ChatRequest
     first = handle_chat(ChatRequest(message="3 days in Paris for culture"))
     unclear = handle_chat(ChatRequest(message="换成购物", conversation_id=first.conversation_id))
     assert unclear.plan is None and "revision_scope" in unclear.missing_fields
@@ -284,8 +284,8 @@ def test_ambiguous_revision_waits_then_resumes_original_request(offline_tools):
 
 
 def test_options_chat_can_be_promoted_to_full_plan(offline_tools):
-    from backend.app.chat import handle_chat
-    from backend.app.models import ChatRequest
+    from backend.app.conversation.chat import handle_chat
+    from backend.app.domain.models import ChatRequest
     options = handle_chat(ChatRequest(message="先比较几个城市，美食文化", requested_output="options"))
     assert options.plan.requested_output == "options" and options.plan.itinerary == []
     planned = handle_chat(ChatRequest(message="3 days in Paris", conversation_id=options.conversation_id))
@@ -315,8 +315,8 @@ def test_multi_day_revision_keeps_distinct_categories(offline_tools):
 
 
 def test_invalid_duration_reply_can_be_corrected_in_next_turn(offline_tools):
-    from backend.app.chat import handle_chat
-    from backend.app.models import ChatRequest
+    from backend.app.conversation.chat import handle_chat
+    from backend.app.domain.models import ChatRequest
     invalid = handle_chat(ChatRequest(message="0 days in Paris"))
     assert invalid.plan is None and invalid.missing_fields == ["trip_length"]
     corrected = handle_chat(ChatRequest(message="3", conversation_id=invalid.conversation_id))
@@ -398,9 +398,9 @@ def test_committed_plan_versions_are_readable_without_model_calls(offline_tools)
 
 
 def test_presentation_mutation_cannot_change_session_plan(offline_tools):
-    from backend.app.chat import handle_chat
-    from backend.app.models import ChatRequest
-    from backend.app.conversation_state import get_conversation
+    from backend.app.conversation.chat import handle_chat
+    from backend.app.domain.models import ChatRequest
+    from backend.app.conversation.conversation_state import get_conversation
     response = handle_chat(ChatRequest(message="3 days in Paris"))
     original_title = get_conversation(response.conversation_id).last_plan.itinerary[0].activities[0].title
     response.plan.itinerary[0].activities[0].title = "Mutated presentation"
@@ -408,8 +408,8 @@ def test_presentation_mutation_cannot_change_session_plan(offline_tools):
 
 
 def test_chinese_origin_is_not_a_confirmed_destination():
-    from backend.app.chat import extract_fields
-    from backend.app.strategy import extract_destination
+    from backend.app.conversation.chat import extract_fields
+    from backend.app.conversation.strategy import extract_destination
     fields = extract_fields("从慕尼黑出发玩三天，预算900欧元，美食文化，火车，节奏适中")
     assert fields["origin_city"] == "Munich"
     assert "destination" not in fields
@@ -419,21 +419,21 @@ def test_chinese_origin_is_not_a_confirmed_destination():
 
 
 def test_debug_ranking_uses_same_analysis_scores(offline_tools):
-    from backend.app.planning_engine import state_from_request, discover_candidates_for_state, rank_candidates_for_state
-    from backend.app.models import TripRequest
+    from backend.app.planning.planning_engine import state_from_request, discover_candidates_for_state, rank_candidates_for_state
+    from backend.app.domain.models import TripRequest
     request = TripRequest(origin_city="Munich", date_range="July", trip_length=3, budget=1000,
                           interests=["culture"], transport_preference="train", physical_level="medium", requested_output="options")
     state = rank_candidates_for_state(discover_candidates_for_state(state_from_request(request)))
-    from backend.app.planning_engine import plan_from_state
+    from backend.app.planning.planning_engine import plan_from_state
     plan = plan_from_state(state_from_request(request))
     assert [candidate.name for candidate in state.candidate_destinations[:3]] == [candidate.name for candidate in plan.ranked_destinations]
     assert [candidate.score for candidate in state.candidate_destinations[:3]] == [candidate.score for candidate in plan.ranked_destinations]
 
 
 def test_explicit_itinerary_request_overrides_router_options(offline_tools, monkeypatch):
-    from backend.app.chat import handle_chat
-    from backend.app.models import ChatRequest, StrategyDecision
-    monkeypatch.setattr("backend.app.chat.decide_strategy", lambda *a, **k: StrategyDecision(
+    from backend.app.conversation.chat import handle_chat
+    from backend.app.domain.models import ChatRequest, StrategyDecision
+    monkeypatch.setattr("backend.app.conversation.chat.decide_strategy", lambda *a, **k: StrategyDecision(
         intent="recommend_destination", next_action="run_destination_discovery", requested_output="options", router_mode="llm"))
     response = handle_chat(ChatRequest(message="从慕尼黑出发玩三天，预算900欧元，喜欢美食文化，火车，节奏适中，请推荐目的地并安排具体行程"))
     assert response.plan.requested_output == "itinerary"
@@ -473,8 +473,8 @@ def test_evidence_identity_is_independent_of_city_alias():
 
 
 def test_long_trip_generation_is_batched_with_global_day_numbers(monkeypatch, evidence):
-    from backend.app.plan_builder import build_itinerary
-    from backend.app.models import DestinationAnalysis
+    from backend.app.planning.plan_builder import build_itinerary
+    from backend.app.domain.models import DestinationAnalysis
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
     calls = []
     def generate(prompt, **kwargs):
@@ -483,7 +483,7 @@ def test_long_trip_generation_is_batched_with_global_day_numbers(monkeypatch, ev
         days = [{"day": number, "activities": [{"title": "Museum", "description": "Visit guide-backed museums.",
                   "category": "culture", "time_slot": "morning", "evidence_ids": [evidence.evidence_id]}]} for number in numbers]
         return LLMResult(json.dumps({"days": days, "pros": [], "cons": [], "explanation": "Guide evidence"}), "test", "anthropic", None, None)
-    monkeypatch.setattr("backend.app.plan_builder.generate_text", generate)
+    monkeypatch.setattr("backend.app.planning.plan_builder.generate_text", generate)
     built = build_itinerary(DestinationAnalysis(destination="Paris", depth="detailed", evidence=[evidence]), TripConstraints(trip_length=7))
     assert calls == [[1, 2, 3, 4], [5, 6, 7]]
     assert [day.day for day in built.days] == list(range(1, 8))

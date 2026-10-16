@@ -1,15 +1,15 @@
 from dotenv import load_dotenv
 from fastapi import FastAPI, Request, HTTPException, Query
 from fastapi.responses import JSONResponse
-from backend.app.plan_store import PlanVersionConflict, PLAN_STORE
-from backend.app.plan_validation import PlanValidationError
-from backend.app.task_builder import PlanningNeedsInput
-from backend.app.revision import RevisionNeedsInput
-from backend.app.execution import BudgetExceeded, RunContext, RUN_CONTEXT
+from backend.app.planning.plan_store import PlanVersionConflict, PLAN_STORE
+from backend.app.planning.plan_validation import PlanValidationError
+from backend.app.planning.task_builder import PlanningNeedsInput
+from backend.app.planning.revision import RevisionNeedsInput
+from backend.app.runtime.execution import BudgetExceeded, RunContext, RUN_CONTEXT
 
-from backend.app.chat import handle_chat
-from backend.app.models import ChatRequest, ChatResponse, PlanningState, TripPlan, TripRequest
-from backend.app.planning_engine import (
+from backend.app.conversation.chat import handle_chat
+from backend.app.domain.models import ChatRequest, ChatResponse, PlanningState, TripPlan, TripRequest
+from backend.app.planning.planning_engine import (
     discover_candidates_for_state,
     plan_from_state,
     rank_candidates_for_state,
@@ -53,7 +53,7 @@ def plan_trip(request: TripRequest) -> TripPlan:
     token = RUN_CONTEXT.set(RunContext())
     try:
         plan = plan_from_state(state_from_request(request))
-        from backend.app.language import render_language
+        from backend.app.conversation.language import render_language
         return render_language(ChatResponse(conversation_id="form", assistant_message=plan.final_recommendation,
                                             plan=plan, response_language=request.response_language), request.response_language).plan
     finally:

@@ -1,10 +1,10 @@
 """
-Tests for backend/app/tools.py — no API key required.
+Tests for backend/app/tool_calling/tools.py — no API key required.
 All tool functions are pure Python lookups.
 """
 
-from backend.app.models import ToolInsight
-from backend.app.tools import (
+from backend.app.domain.models import ToolInsight
+from backend.app.tool_calling.tools import (
     estimate_total_cost,
     estimate_transport_time,
     estimate_weather_risk,

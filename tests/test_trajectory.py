@@ -4,13 +4,13 @@ from types import SimpleNamespace
 
 import pytest
 
-from backend.app.chat import handle_chat
-from backend.app.models import ChatRequest, StrategyDecision
-from backend.app.trajectory import Trajectory, _CURRENT, clean, create_message, observed
+from backend.app.conversation.chat import handle_chat
+from backend.app.domain.models import ChatRequest, StrategyDecision
+from backend.app.runtime.trajectory import Trajectory, _CURRENT, clean, create_message, observed
 
 
 def test_exception_group_preserves_inner_failure_and_redacts_key(monkeypatch):
-    from backend.app.trajectory import error_details
+    from backend.app.runtime.trajectory import error_details
     monkeypatch.setenv("GEOAPIFY_API_KEY", "geo-private-value")
     error = ExceptionGroup("MCP task group failed", [ValueError("Bad selection geo-private-value")])
     details = error_details(error)
@@ -26,7 +26,7 @@ def trajectory_directory(tmp_path, monkeypatch):
 
 
 def test_chat_persists_linked_runs_and_field_changes(tmp_path, monkeypatch):
-    monkeypatch.setattr("backend.app.chat.decide_strategy", lambda *a, **k: StrategyDecision(
+    monkeypatch.setattr("backend.app.conversation.chat.decide_strategy", lambda *a, **k: StrategyDecision(
         intent="clarify", next_action="ask_user", missing_fields=["start_date"], reason="test", router_mode="llm"))
     first = handle_chat(ChatRequest(message="Paris"))
     second = handle_chat(ChatRequest(message="3 days", conversation_id=first.conversation_id))
@@ -67,7 +67,7 @@ def test_timeout_metadata_and_redaction(monkeypatch):
 def test_failed_run_is_saved_and_context_reset(tmp_path, monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError("router failed")
-    monkeypatch.setattr("backend.app.chat.decide_strategy", fail)
+    monkeypatch.setattr("backend.app.conversation.chat.decide_strategy", fail)
     with pytest.raises(RuntimeError):
         handle_chat(ChatRequest(message="Paris"))
     data = json.loads(next(tmp_path.glob("*.traj.json")).read_text())
@@ -77,7 +77,7 @@ def test_failed_run_is_saved_and_context_reset(tmp_path, monkeypatch):
 
 
 def test_concurrent_runs_are_isolated(monkeypatch):
-    monkeypatch.setattr("backend.app.chat.decide_strategy", lambda *a, **k: StrategyDecision(
+    monkeypatch.setattr("backend.app.conversation.chat.decide_strategy", lambda *a, **k: StrategyDecision(
         intent="clarify", next_action="ask_user", missing_fields=["destination"], reason="test", router_mode="llm"))
     with ThreadPoolExecutor(max_workers=2) as executor:
         responses = list(executor.map(lambda message: handle_chat(ChatRequest(message=message)), ["hello", "world"]))
@@ -98,7 +98,7 @@ def test_persistence_failure_does_not_break_chat(tmp_path, monkeypatch):
 
 
 def test_fixed_itinerary_fallback_records_retrieval_and_errors(monkeypatch):
-    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", lambda *a, **k: [{
+    monkeypatch.setattr("backend.app.rag.knowledge.search_travel_knowledge", lambda *a, **k: [{
         "text": "Paris - See\nVisit museums and walk along the river.",
         "destination": "Paris", "section": "See", "score": 0.9,
         "url": "https://en.wikivoyage.org/wiki/Paris"}])

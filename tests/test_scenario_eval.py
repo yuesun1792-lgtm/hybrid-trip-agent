@@ -4,8 +4,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from backend.app.models import ChatResponse, ExecutionTraceStep, TripPlan
-from backend.app.planning_models import Activity, Day
+from backend.app.domain.models import ChatResponse, ExecutionTraceStep, TripPlan
+from backend.app.domain.planning_models import Activity, Day
 from scripts.eval_scenarios import Expectations, Suite, check_turn, main, run_suite
 
 

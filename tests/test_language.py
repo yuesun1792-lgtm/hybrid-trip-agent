@@ -4,11 +4,11 @@ import re
 import numpy as np
 import pytest
 
-from backend.app.chat import extract_fields, handle_chat
-from backend.app.field_validation import normalize_trip_fields
-from backend.app.language import choose_language
-from backend.app.llm import LLMResult
-from backend.app.models import ChatRequest
+from backend.app.conversation.chat import extract_fields, handle_chat
+from backend.app.domain.field_validation import normalize_trip_fields
+from backend.app.conversation.language import choose_language
+from backend.app.llm.llm import LLMResult
+from backend.app.domain.models import ChatRequest
 
 
 @pytest.fixture(autouse=True)
@@ -57,8 +57,8 @@ def test_chinese_clarification_without_api_and_numeric_followup(monkeypatch):
 
 
 def test_chinese_pipeline_keeps_rag_english_and_filters_other_cities(monkeypatch):
-    import backend.app.strategy as strategy
-    import backend.app.language as language
+    import backend.app.conversation.strategy as strategy
+    import backend.app.conversation.language as language
     captured = []
     monkeypatch.setattr(strategy, "generate_text", lambda prompt, **k: result(json.dumps({
         "intent": "plan_fixed_destination", "next_action": "run_fixed_itinerary",
@@ -68,16 +68,16 @@ def test_chinese_pipeline_keeps_rag_english_and_filters_other_cities(monkeypatch
         captured.append((query, destination))
         return [{"text": "Paris - See\nMuseums and riverside walks offer visitors cultural activities throughout Paris.", "destination": "Paris", "section": "See", "url": "https://en.wikivoyage.org/wiki/Paris", "score": .9},
                 {"text": "Rome - Eat\nLocal pasta.", "destination": "Rome", "section": "Eat", "url": "https://en.wikivoyage.org/wiki/Rome", "score": .5}]
-    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", search)
+    monkeypatch.setattr("backend.app.rag.knowledge.search_travel_knowledge", search)
     def write(prompt, **kwargs):
         assert "language en" in prompt
         assert "Museums" in prompt
         assert "Local pasta" not in prompt
-        from backend.app.models import EvidenceChunk
+        from backend.app.domain.models import EvidenceChunk
         ref = EvidenceChunk(text="Paris - See\nMuseums and riverside walks offer visitors cultural activities throughout Paris.", destination="Paris", section="See", url="https://en.wikivoyage.org/wiki/Paris").evidence_id
         return result(json.dumps({"days": [{"day": i, "activities": [{"title": "Museum", "description": "Visit a museum.", "category": "culture", "time_slot": "morning", "evidence_ids": [ref]}]} for i in range(1, 4)],
             "pros": ["Cultural activities"], "cons": [], "explanation": "Three days using guide evidence."}))
-    monkeypatch.setattr("backend.app.plan_builder.generate_text", write)
+    monkeypatch.setattr("backend.app.planning.plan_builder.generate_text", write)
     def translate(prompt, **kwargs):
         texts = json.loads(prompt.split("Texts: ", 1)[1])
         return result(json.dumps({"texts": [t if re.search(r"[\u3400-\u9fff]", t) else "中文说明：" + t for t in texts]}))
@@ -93,14 +93,14 @@ def test_chinese_pipeline_keeps_rag_english_and_filters_other_cities(monkeypatch
     assert all(c.url.endswith("/Paris") for c in suggestion.citations)
     assert response.plan.itinerary[0].destination == "Paris"
     assert "中文说明" in response.plan.itinerary[0].plan
-    from backend.app.conversation_state import get_conversation
+    from backend.app.conversation.conversation_state import get_conversation
     assert get_conversation(response.conversation_id).last_plan.itinerary[0].activities[0].title == "Museum"
     assert suggestion.citations[0].snippet.startswith("Museums")
     assert response.trajectory["language"]["retrieval_language"] == "en"
 
 
 def test_unknown_destination_does_not_broaden_vector_search(monkeypatch):
-    import backend.app.knowledge as knowledge
+    import backend.app.rag.knowledge as knowledge
     monkeypatch.setattr(knowledge, "_load_index", lambda: {"embeddings": np.array([[1., 0.]]),
         "texts": ["Paris museums"], "metadata": [{"destination": "Paris", "section": "See"}]})
     monkeypatch.setattr(knowledge, "_embed_query", lambda query: np.array([1., 0.]))
@@ -109,11 +109,11 @@ def test_unknown_destination_does_not_broaden_vector_search(monkeypatch):
 
 
 def test_translation_failure_keeps_original_facts_and_marks_fallback(monkeypatch):
-    from backend.app.language import render_language
-    from backend.app.models import ChatResponse
+    from backend.app.conversation.language import render_language
+    from backend.app.domain.models import ChatResponse
     def fail(*a, **k):
         raise ValueError("translation failed")
-    monkeypatch.setattr("backend.app.language.generate_text", fail)
+    monkeypatch.setattr("backend.app.conversation.language.generate_text", fail)
     response = render_language(ChatResponse(conversation_id="test", assistant_message="Plan ready"), "zh")
     assert response.trace[-1].status == "fallback"
     assert "语言转换" in response.assistant_message

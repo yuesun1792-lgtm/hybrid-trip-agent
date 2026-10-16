@@ -15,9 +15,9 @@ def main() -> int:
     args = parser.parse_args()
     load_dotenv()
     from backend.app.config import llm_api_key, llm_model, llm_provider
-    from backend.app.trajectory import Trajectory, _CURRENT, clean, error_details
-    from backend.app.models import ChatRequest, ChatResponse
-    from backend.app.llm import generate_text
+    from backend.app.runtime.trajectory import Trajectory, _CURRENT, clean, error_details
+    from backend.app.domain.models import ChatRequest, ChatResponse
+    from backend.app.llm.llm import generate_text
 
     try:
         if not llm_api_key():
@@ -28,7 +28,7 @@ def main() -> int:
         return 2
 
     if args.chat:
-        from backend.app.chat import handle_chat
+        from backend.app.conversation.chat import handle_chat
         try:
             response = handle_chat(ChatRequest(
                 message=args.message or "Plan 3 days in Paris for food and art, from Munich in July, budget 1000, train, medium.",
@@ -48,7 +48,7 @@ def main() -> int:
                                   "activity_count": sum(len(d.activities) for d in response.plan.itinerary) if response.plan else 0,
                                   "llm_usage": response.llm_usage}), ensure_ascii=False, indent=2))
             if args.revision_message and response.plan:
-                from backend.app.conversation_state import get_conversation
+                from backend.app.conversation.conversation_state import get_conversation
                 before = get_conversation(response.conversation_id).last_plan.model_copy(deep=True)
                 revised = handle_chat(ChatRequest(message=args.revision_message, conversation_id=response.conversation_id,
                                                  expected_plan_version=before.version))

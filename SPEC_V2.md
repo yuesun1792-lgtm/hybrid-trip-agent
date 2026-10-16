@@ -20,7 +20,7 @@ signals a tool call, how results are returned, and how the conversation continue
 
 ### New files
 
-- `backend/app/tools.py`
+- `backend/app/tool_calling/tools.py`
   - Tool implementations (plain Python functions over mock data):
     - `get_destination_details(name: str) -> dict` — return the full record for a
       destination from `destination_notes.json` (description, estimated cost, activities,
@@ -32,7 +32,7 @@ signals a tool call, how results are returned, and how the conversation continue
   - `TOOL_SCHEMAS` — the Anthropic `tools` list (JSON schema) describing both tools to the model.
   - `dispatch_tool(name: str, tool_input: dict) -> dict` — map a tool name to its function.
 
-- `backend/app/agent.py`
+- `backend/app/legacy/agent.py`
   - `explain_with_tools(plan) -> str` — the hand-rolled tool-use loop:
     1. Build the initial messages from the system prompt + the already-computed plan.
     2. Call Claude with `tools=TOOL_SCHEMAS`.
@@ -43,12 +43,12 @@ signals a tool call, how results are returned, and how the conversation continue
 
 ### Changed files
 
-- `backend/app/explainer.py`
+- `backend/app/legacy/explainer.py`
   - `generate_explanation(plan)` keeps the same signature and role. If `ANTHROPIC_API_KEY`
     is present, delegate to `agent.explain_with_tools(plan)`. If absent — **or if the agent
     call raises** — return the existing template fallback. Never crash the `/plan` endpoint.
 
-- `backend/app/prompts.py`
+- `backend/app/llm/prompts.py`
   - Add/adjust the system prompt so the model knows the tools exist and may use them to
     verify details before explaining. Keep the fallback string.
 
