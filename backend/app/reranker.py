@@ -14,9 +14,9 @@ Gracefully degrades to cosine order if the API key is absent or the call fails.
 from __future__ import annotations
 
 import json
-import os
 
-from backend.app.config import ANTHROPIC_MODEL
+from backend.app.config import llm_api_key
+from backend.app.llm import generate_text
 
 
 def llm_rerank(
@@ -26,12 +26,12 @@ def llm_rerank(
     k: int,
     raise_on_error: bool = False,
 ) -> list[dict]:
-    """Score candidates by relevance to (query, taste_profile) via one Haiku call.
+    """Score candidates by relevance to (query, taste_profile) via one LLM call.
 
     Each chunk gets a 0–10 score; chunks are re-sorted descending and the top k
     are returned. On any failure, returns the original cosine-ranked slice.
     """
-    api_key = os.environ.get("ANTHROPIC_API_KEY")
+    api_key = llm_api_key()
     if not api_key or not candidates:
         return candidates[:k]
 
@@ -52,15 +52,9 @@ def llm_rerank(
     )
 
     try:
-        import anthropic
-
-        client = anthropic.Anthropic(api_key=api_key)
-        response = client.messages.create(
-            model=ANTHROPIC_MODEL,
-            max_tokens=256,
-            messages=[{"role": "user", "content": prompt}],
-        )
-        scores_raw = response.content[0].text.strip()
+        response = generate_text(prompt, stage="chunk_reranker", max_tokens=256,
+                                 prompt_version="chunk_reranker_v1")
+        scores_raw = response.text
         scores = json.loads(scores_raw)
         for i, chunk in enumerate(candidates):
             chunk["rerank_score"] = float(scores[i]) / 10.0 if i < len(scores) else chunk["score"]

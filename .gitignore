@@ -33,3 +33,7 @@ node_modules/
 # Logs
 *.log
 data/knowledge_index.npz
+
+# Chat trajectories contain user messages and plans
+data/trajectories/
+data/evaluations/

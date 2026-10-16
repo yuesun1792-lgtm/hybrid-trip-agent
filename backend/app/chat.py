@@ -1,19 +1,24 @@
+from backend.app.task_builder import task_from_fields, PlanningNeedsInput
+from backend.app.unified_planner import execute_task
+from backend.app.revision import RevisionNeedsInput
+from backend.app.plan_store import PlanVersionConflict
+from backend.app.execution import RUN_CONTEXT, RunContext
+from backend.app.language import choose_language, render_language
+from backend.app.field_validation import normalize_trip_fields
+from backend.app.trajectory import Trajectory, _CURRENT, observed, record_trace
 import re
 import uuid
 from typing import Any
 
-from backend.app.config import llm_rag_enhancements_enabled
 from backend.app.conversation_state import get_conversation
-from backend.app.fixed_itinerary import build_fixed_destination_plan
-from backend.app.models import ChatRequest, ChatResponse, ExecutionTraceStep, TripPlan, TripRequest
-from backend.app.planning_engine import plan_from_state, state_from_request
+from backend.app.models import ChatRequest, ChatResponse, ExecutionTraceStep, TripRequest, LLMUsage, StrategyDecision
 from backend.app.strategy import (
     decide_strategy,
     extract_destination,
-    missing_for_fixed_itinerary,
+    infer_output_scope,
 )
 
-INTERESTS = ["food", "history", "art", "nature", "nightlife", "architecture"]
+INTERESTS = ["food", "history", "art", "culture", "fashion", "nature", "nightlife", "architecture"]
 TRANSPORT_MODES = ["train", "flight", "bus"]
 PHYSICAL_LEVELS = ["low", "medium", "high"]
 MONTHS = [
@@ -65,9 +70,10 @@ def _has_day_reference(text: str) -> bool:
     )
 
 
+@observed("field_extraction", "parser")
 def extract_fields(message: str, existing: dict[str, Any] | None = None) -> dict[str, Any]:
     """Small rule-based parser for V6 chat bootstrapping."""
-    fields = dict(existing or {})
+    fields = normalize_trip_fields(existing or {})
     text = message.strip()
     lower = text.lower()
 
@@ -77,6 +83,10 @@ def extract_fields(message: str, existing: dict[str, Any] | None = None) -> dict
     )
     if origin:
         fields["origin_city"] = origin.title()
+    zh_origin = _first_match(r"从\s*([^，,。;\n]+?)\s*(?:出发|前往|到|去)", text)
+    if zh_origin:
+        from backend.app.destination_names import canonical_destination
+        fields["origin_city"] = canonical_destination(zh_origin)
 
     destination = extract_destination(text)
     if destination:
@@ -86,20 +96,29 @@ def extract_fields(message: str, existing: dict[str, Any] | None = None) -> dict
     if length:
         fields["trip_length"] = int(length)
     elif not _has_day_reference(text):
-        zh_length = _first_match(r"([一二两三四五六七八九十]|\d{1,2})\s*天", text)
+        duration_text = re.sub(r"\d{1,2}\s*月\s*\d{1,2}\s*日", "", text)
+        zh_length = _first_match(r"([一二两三四五六七八九十]|\d{1,2})\s*(?:天|日(?:游)?)", duration_text)
         if zh_length:
             parsed = _parse_day_count(zh_length)
             if parsed > 0:
                 fields["trip_length"] = parsed
 
     budget = _first_match(r"(?:budget|under|within|around|about|€|eur)\s*€?\s*(\d{2,5})", lower)
-    if budget:
-        fields["budget"] = int(budget)
+    zh_budget = _first_match(r"预算\s*(\d{2,5})\s*(?:欧元|EUR|€)", text)
+    if budget or zh_budget:
+        fields["budget"] = int(budget or zh_budget)
 
     for mode in TRANSPORT_MODES:
         if re.search(rf"\b{mode}\b", lower):
             fields["transport_preference"] = mode
             break
+
+    for label, mode in {"火车": "train", "飞机": "flight", "巴士": "bus"}.items():
+        if label in text:
+            fields["transport_preference"] = mode
+    for label, level in {"轻松": "low", "适中": "medium", "紧凑": "high"}.items():
+        if label in text:
+            fields["physical_level"] = level
 
     for level in PHYSICAL_LEVELS:
         if re.search(rf"\b{level}\b", lower):
@@ -110,6 +129,9 @@ def extract_fields(message: str, existing: dict[str, Any] | None = None) -> dict
     for interest in INTERESTS:
         if re.search(rf"\b{interest}\b", lower) and interest not in interests:
             interests.append(interest)
+    for label, name in {"美食": "food", "文化": "culture", "时尚": "fashion", "艺术": "art", "历史": "history", "自然": "nature", "夜生活": "nightlife", "建筑": "architecture"}.items():
+        if label in text and name not in interests:
+            interests.append(name)
     if interests:
         fields["interests"] = interests
 
@@ -149,6 +171,8 @@ def _question_for_missing(field: str) -> str:
         "transport_preference": "Do you prefer train, flight, or bus?",
         "physical_level": "What physical level should I assume: low, medium, or high?",
         "destination": "Which destination should I build the itinerary for?",
+        "revision_scope": "Which day or activity should I change?",
+        "existing_plan": "What trip should I plan before making revisions?",
     }
     return questions.get(field, f"Could you share {field}?")
 
@@ -168,290 +192,127 @@ def _trip_request_from_fields(fields: dict[str, Any]) -> TripRequest:
 
 
 def _trace(stage: str, detail: str = "", status: str = "ok") -> ExecutionTraceStep:
+    record_trace(stage, detail, status)
     return ExecutionTraceStep(stage=stage, status=status, detail=detail)
 
 
-def _target_day_from_message(message: str, plan: TripPlan) -> int:
-    total_days = len(plan.itinerary)
-    lower = message.lower()
-    if "最后一天" in message or "last day" in lower or "final day" in lower:
-        return total_days
-
-    zh_day = _first_match(r"第\s*([一二两三四五六七八九十]|\d{1,2})\s*天", message)
-    if zh_day:
-        parsed = _parse_day_count(zh_day)
-        if parsed > 0:
-            return min(parsed, total_days)
-
-    en_day = _first_match(r"\bday\s+(\d{1,2})\b", lower)
-    if en_day:
-        return min(int(en_day), total_days)
-
-    return total_days
-
-
-def _revise_existing_plan(plan: TripPlan, message: str, fields: dict[str, Any]) -> TripPlan:
-    target_day = _target_day_from_message(message, plan)
-    interests = ", ".join(fields.get("interests") or []) or "your priorities"
-    destination = (
-        plan.itinerary[target_day - 1].destination
-        if 0 < target_day <= len(plan.itinerary)
-        else fields.get("destination", "the destination")
-    )
-    lower = message.lower()
-
-    if any(term in message for term in ["太赶", "太满"]) or any(term in lower for term in ["too rushed", "too busy"]):
-        revision_note = "slow the pace down and leave more flexible time"
-    elif "太贵" in message or "too expensive" in lower:
-        revision_note = "reduce cost pressure by favoring low-cost walks, public spaces, and flexible meals"
-    elif "不要" in message or "replace" in lower or "换" in message:
-        revision_note = "replace the part you disliked while keeping the rest of the plan stable"
-    else:
-        revision_note = "make the day lighter and more coherent"
-
-    revised_text = (
-        f"Revised after your feedback: {revision_note}. "
-        f"Keep Day {target_day} in {destination} focused on {interests}, with one main daytime block, "
-        "one optional backup activity, and an easier evening instead of adding another dense route."
-    )
-    itinerary = [
-        day.model_copy(update={"plan": revised_text}) if day.day == target_day else day
-        for day in plan.itinerary
-    ]
-    planner_mode = plan.planner_mode
-    if not planner_mode.endswith("_revised"):
-        planner_mode = f"{planner_mode}_revised"
-    tradeoff_summary = [
-        *plan.tradeoff_summary,
-        f"Conversation state detected a revision request and updated Day {target_day} without rebuilding the whole plan.",
-    ]
-    return plan.model_copy(
-        update={
-            "itinerary": itinerary,
-            "planner_mode": planner_mode,
-            "final_recommendation": f"Updated Day {target_day} of the {destination} itinerary.",
-            "explanation": (
-                f"I used the previous plan from this conversation and revised Day {target_day}, "
-                "instead of treating your feedback as a new trip request."
-            ),
-            "tradeoff_summary": tradeoff_summary,
-        }
-    )
+def _handle_chat(request: ChatRequest) -> ChatResponse:
+    conversation_id = request.conversation_id or str(uuid.uuid4())
+    conversation = get_conversation(conversation_id)
+    base_fields = {**request.extracted_fields, **conversation.extracted_fields, **conversation.pending_revision_fields}
+    fields = extract_fields(request.message, base_fields)
+    if conversation.pending_fields and re.fullmatch(r"\s*\d+\s*", request.message):
+        pending = conversation.pending_fields[0]
+        if pending in {"trip_length", "budget"}:
+            fields[pending] = int(request.message.strip())
+    fields["response_language"] = conversation.response_language
+    conversation.messages.append({"role": "user", "content": request.message})
+    trace = [_trace("field_extraction", f"Extracted fields: {', '.join(sorted(fields))}")]
+    decision = (StrategyDecision(intent="revise_plan", next_action="revise_existing_plan", router_mode="rule",
+                                 reason="Explicit typed revision bypasses model routing.") if request.revision else
+                decide_strategy(request.message, fields, context=conversation.context()))
+    fields.update({key: value for key, value in decision.known_fields.items() if value not in (None, "", [])})
+    fields["response_language"] = conversation.response_language
+    trace.append(_trace("task_router", f"{decision.router_mode} router selected intent={decision.intent}. {decision.reason}",
+                        "fallback" if decision.router_fallback_reason else "ok"))
+    operation = "revise" if request.revision or decision.intent == "revise_plan" or conversation.pending_revision_message else "create"
+    message = request.message
+    if conversation.pending_revision_message:
+        clarification = f"day {request.message.strip()}" if conversation.pending_fields == ["revision_scope"] and request.message.strip().isdigit() else request.message
+        message = f"{conversation.pending_revision_message}. Clarification: {clarification}"
+    requested_output = infer_output_scope(request.message, request.requested_output, decision.requested_output)
+    if operation == "revise" and conversation.last_plan:
+        requested_output = conversation.last_plan.requested_output
+    if operation == "revise" and any(term in request.message.lower() for term in ("不要", "not ", "avoid ")):
+        rejected = extract_destination(request.message)
+        if rejected and rejected not in conversation.rejected_destinations:
+            conversation.rejected_destinations.append(rejected)
+        if rejected and fields.get("destination") == rejected:
+            fields["destination"] = None
+    task = None
+    try:
+        task = task_from_fields(fields, operation=operation, base_plan=conversation.last_plan,
+            supplied_revision=request.revision, expected_version=request.expected_plan_version,
+            message=message, requested_output=requested_output, queries=decision.queries,
+            rejected=conversation.rejected_destinations)
+        plan = execute_task(task, base_plan=conversation.last_plan)
+    except (PlanningNeedsInput, RevisionNeedsInput) as exc:
+        missing = exc.fields if isinstance(exc, PlanningNeedsInput) else [exc.field]
+        trace.append(_trace("clarification", str(exc)))
+        conversation.pending_fields = missing
+        if isinstance(exc, PlanningNeedsInput) and exc.__cause__:
+            fields = {key: value for key, value in fields.items() if key not in missing}
+        if operation == "revise":
+            conversation.pending_revision_message = message
+            conversation.pending_revision_fields = fields
+            # Failed revisions must not overwrite committed constraints.
+        else:
+            conversation.extracted_fields = fields
+        conversation.current_stage = "clarifying"
+        assistant = _question_for_missing(missing[0]) if missing[0] not in {"revision_scope", "existing_plan"} else str(exc)
+        conversation.messages.append({"role": "assistant", "content": assistant})
+        return ChatResponse(conversation_id=conversation_id, assistant_message=assistant,
+                            extracted_fields=conversation.extracted_fields, missing_fields=missing, trace=trace,
+                            planning_task=task.model_dump(mode="json") if task else None)
+    if plan.place_resolution.status != "disabled":
+        trace.append(_trace("place_resolution", plan.place_resolution.message,
+                            "fallback" if plan.place_resolution.status == "failed" else "ok"))
+    trace.append(_trace("plan_builder", f"Returned planner_mode={plan.planner_mode}; version={plan.version}.",
+                        "fallback" if plan.fallback_reason else "ok"))
+    conversation.last_plan = plan  # Canonical committed plan, never the translated presentation.
+    conversation.extracted_fields = {**task.constraints.model_dump(mode="json", exclude_none=True),
+                                     "response_language": conversation.response_language}
+    conversation.pending_revision_message = None
+    conversation.pending_revision_fields = {}
+    conversation.pending_fields = []
+    conversation.current_stage = "plan_revised" if operation == "revise" else "plan_built"
+    assistant = plan.final_recommendation
+    conversation.messages.append({"role": "assistant", "content": assistant})
+    return ChatResponse(conversation_id=conversation_id, assistant_message=assistant,
+        extracted_fields=conversation.extracted_fields, missing_fields=[], trace=trace, plan=plan,
+        planning_task=task.model_dump(mode="json"))
 
 
 def handle_chat(request: ChatRequest) -> ChatResponse:
     conversation_id = request.conversation_id or str(uuid.uuid4())
     conversation = get_conversation(conversation_id)
-    llm_usage = []
-    base_fields = {**conversation.extracted_fields, **request.extracted_fields}
-    fields = extract_fields(request.message, base_fields)
-    conversation.messages.append({"role": "user", "content": request.message})
-    trace = [
-        _trace(
-            "field_extraction",
-            f"Extracted fields: {', '.join(sorted(fields.keys())) or 'none'}",
-        )
-    ]
-    decision = decide_strategy(request.message, fields, context=conversation.context())
-    if decision.llm_usage:
-        llm_usage.append(decision.llm_usage)
-    fields.update({key: value for key, value in decision.known_fields.items() if value not in (None, "", [])})
-    trace.append(
-        _trace(
-            "task_router",
-            " ".join(
-                [
-                    f"{decision.router_mode} router selected intent={decision.intent},",
-                    f"next_action={decision.next_action}.",
-                    decision.reason,
-                    f"Fallback reason: {decision.router_fallback_reason}."
-                    if decision.router_fallback_reason
-                    else "",
-                ]
-            ).strip(),
-            "fallback" if decision.router_mode == "rule" else "ok",
-        )
-    )
+    # Serialize turns for one conversation; independent conversations remain concurrent.
+    with conversation.lock:
+        return _run_chat(request.model_copy(update={"conversation_id": conversation_id}), conversation)
 
-    if decision.next_action == "revise_existing_plan":
-        if conversation.last_plan is None:
-            trace.append(_trace("revision", "No previous plan found for this conversation.", "fallback"))
-            return ChatResponse(
-                conversation_id=conversation_id,
-                assistant_message="I can revise a plan after I have built one. What trip should we plan first?",
-                extracted_fields=fields,
-                missing_fields=[],
-                trace=trace,
-                llm_usage=llm_usage,
-            )
-        rejected_destination = extract_destination(request.message)
-        if ("不要" in request.message or "not " in request.message.lower()) and rejected_destination:
-            if rejected_destination not in conversation.rejected_destinations:
-                conversation.rejected_destinations.append(rejected_destination)
-            trace.append(_trace("state_update", f"Marked rejected destination: {rejected_destination}"))
-        plan = _revise_existing_plan(conversation.last_plan, request.message, fields)
-        conversation.last_plan = plan
-        conversation.extracted_fields = fields
-        conversation.current_stage = "plan_revised"
-        assistant_message = f"I updated the existing plan: {plan.final_recommendation}"
-        conversation.messages.append({"role": "assistant", "content": assistant_message})
-        trace.append(
-            _trace(
-                "revision",
-                "Reused conversation last_plan and updated only the referenced itinerary day.",
-            )
-        )
-        return ChatResponse(
-            conversation_id=conversation_id,
-            assistant_message=assistant_message,
-            extracted_fields=fields,
-            missing_fields=[],
-            trace=trace,
-            llm_usage=llm_usage,
-            plan=plan,
-        )
 
-    if decision.next_action == "run_fixed_itinerary":
-        missing = missing_for_fixed_itinerary(fields)
-        if missing:
-            trace.append(_trace("clarification", f"Missing fixed-itinerary field: {missing[0]}"))
-            conversation.extracted_fields = fields
-            conversation.current_stage = "clarifying_fixed_itinerary"
-            assistant_message = _question_for_missing(missing[0])
-            conversation.messages.append({"role": "assistant", "content": assistant_message})
-            return ChatResponse(
-                conversation_id=conversation_id,
-                assistant_message=assistant_message,
-                extracted_fields=fields,
-                missing_fields=missing,
-                trace=trace,
-                llm_usage=llm_usage,
-            )
-        trace.append(
-            _trace(
-                "fixed_itinerary_workflow",
-                f"Building itinerary for {fields.get('destination')} using {len(decision.queries)} retrieval queries.",
-            )
-        )
-        result = build_fixed_destination_plan(fields, queries=decision.queries)
-        if result.llm_usage:
-            llm_usage.append(result.llm_usage)
-        plan = result.plan
-        if result.llm_used:
-            trace.append(
-                _trace(
-                    "llm_itinerary_writer",
-                    f"LLM generated {len(plan.itinerary)} day plans from {result.evidence_count} retrieved chunks.",
-                )
-            )
-        elif result.fallback_reason:
-            trace.append(
-                _trace(
-                    "llm_itinerary_writer",
-                    f"Skipped or failed; using rule itinerary builder. {result.fallback_reason}. Retrieved chunks={result.evidence_count}.",
-                    "fallback",
-                )
-            )
-        trace.append(
-            _trace(
-                "plan_builder",
-                f"Returned planner_mode={plan.planner_mode}; evidence-backed citations={len(plan.ranked_destinations[0].citations) if plan.ranked_destinations else 0}.",
-                "fallback" if plan.fallback_reason else "ok",
-            )
-        )
-        conversation.last_plan = plan
-        conversation.extracted_fields = fields
-        conversation.current_stage = "fixed_itinerary_built"
-        assistant_message = (
-            f"I built a fixed-destination itinerary: {plan.final_recommendation} "
-            "I skipped destination ranking because you already chose the city."
-        )
-        conversation.messages.append({"role": "assistant", "content": assistant_message})
-        return ChatResponse(
-            conversation_id=conversation_id,
-            assistant_message=assistant_message,
-            extracted_fields=fields,
-            missing_fields=[],
-            trace=trace,
-            llm_usage=llm_usage,
-            plan=plan,
-        )
-
-    if decision.next_action == "ask_user":
-        missing = decision.missing_fields or missing_fields(fields)
-        if not missing:
-            missing = ["interests"]
-        trace.append(_trace("clarification", f"Missing field: {missing[0]}"))
-        conversation.extracted_fields = fields
-        conversation.current_stage = "clarifying"
-        assistant_message = _question_for_missing(missing[0])
-        conversation.messages.append({"role": "assistant", "content": assistant_message})
-        return ChatResponse(
-            conversation_id=conversation_id,
-            assistant_message=assistant_message,
-            extracted_fields=fields,
-            missing_fields=missing,
-            trace=trace,
-            llm_usage=llm_usage,
-        )
-
-    missing = missing_fields(fields)
-    if missing:
-        trace.append(_trace("clarification", f"Missing recommendation field: {missing[0]}"))
-        conversation.extracted_fields = fields
-        conversation.current_stage = "clarifying_recommendation"
-        assistant_message = _question_for_missing(missing[0])
-        conversation.messages.append({"role": "assistant", "content": assistant_message})
-        return ChatResponse(
-            conversation_id=conversation_id,
-            assistant_message=assistant_message,
-            extracted_fields=fields,
-            missing_fields=missing,
-            trace=trace,
-            llm_usage=llm_usage,
-        )
-
-    trip_request = _trip_request_from_fields(fields)
-    state = state_from_request(trip_request, conversation_id=conversation_id)
-    trace.append(
-        _trace(
-            "destination_recommendation_workflow",
-            (
-                "Calling RAG-ranked planning engine: discover candidates -> rank -> build TripPlan. "
-                f"LLM RAG enhancements enabled={llm_rag_enhancements_enabled()}."
-            ),
-        )
-    )
-    plan = plan_from_state(state)
-    trace.append(
-        _trace(
-            "plan_builder",
-            f"Returned planner_mode={plan.planner_mode}; fallback_reason={plan.fallback_reason or 'none'}.",
-            "fallback" if plan.fallback_reason else "ok",
-        )
-    )
-    if plan.planner_mode == "rag_ranked_llm":
-        trace.append(
-            _trace(
-                "llm_rag_enhancements",
-                "LLM participated in research control, candidate reranking, or candidate copy generation.",
-            )
-        )
-    conversation.last_plan = plan
-    conversation.extracted_fields = fields
-    conversation.current_stage = "recommendation_built"
-    assistant_message = (
-        f"I found a plan: {plan.final_recommendation} "
-        "I used your constraints to rank candidates and kept the tradeoffs visible."
-    )
-    conversation.messages.append({"role": "assistant", "content": assistant_message})
-    return ChatResponse(
-        conversation_id=conversation_id,
-        assistant_message=assistant_message,
-        extracted_fields=fields,
-        missing_fields=[],
-        trace=trace,
-        llm_usage=llm_usage,
-        state=state,
-        plan=plan,
-    )
+def _run_chat(request, conversation):
+    conversation_id = conversation.conversation_id
+    conversation.response_language = choose_language(request.message, conversation.response_language, request.response_language)
+    recorder = Trajectory(conversation_id, conversation.last_run_id, request.message,
+                          {**conversation.extracted_fields, **request.extracted_fields})
+    recorder.data["language"] = {"response_language": conversation.response_language,
+                                 "retrieval_language": "en", "evidence_language": "en"}
+    conversation.last_run_id = recorder.data["run_id"]
+    token = _CURRENT.set(recorder)
+    context = RunContext()
+    context_token = RUN_CONTEXT.set(context)
+    try:
+        if request.expected_plan_version is not None and (not conversation.last_plan or request.expected_plan_version != conversation.last_plan.version):
+            raise PlanVersionConflict("Client plan version is outdated; reload the current plan.")
+        response = _handle_chat(request)
+        response = response.model_copy(update={"response_language": conversation.response_language})
+        response = render_language(response, conversation.response_language)
+        if conversation.messages and conversation.messages[-1]["role"] == "assistant":
+            conversation.messages[-1]["content"] = response.assistant_message
+        recorded_usage = [LLMUsage.model_validate(step["llm"]["usage"])
+                          for step in recorder.data["steps"] if step.get("llm", {}).get("usage") is not None]
+        if recorded_usage:
+            response = response.model_copy(update={"llm_usage": recorded_usage})
+        recorder.data["budget"] = {"llm_calls": context.llm_calls, "tool_calls": context.tool_calls,
+                                    "max_llm_calls": context.max_llm_calls, "max_tool_calls": context.max_tool_calls,
+                                    "reserved_output_tokens": context.reserved_output_tokens,
+                                    "max_output_tokens": context.max_output_tokens}
+        recorder.finish(response=response)
+        return response.model_copy(deep=True, update={"run_id": recorder.data["run_id"], "trajectory": recorder.data})
+    except Exception as exc:
+        recorder.finish(error=exc)
+        raise
+    finally:
+        RUN_CONTEXT.reset(context_token)
+        _CURRENT.reset(token)

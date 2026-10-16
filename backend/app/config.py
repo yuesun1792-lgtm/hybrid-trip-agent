@@ -21,7 +21,7 @@ def env_flag(name: str, default: bool = False) -> bool:
 
 
 def llm_rag_enhancements_enabled() -> bool:
-    return bool(os.environ.get("ANTHROPIC_API_KEY")) and env_flag(
+    return bool(llm_api_key()) and env_flag(
         "ENABLE_LLM_RAG_ENHANCEMENTS",
         default=True,
     )
@@ -69,3 +69,32 @@ def llm_cache_write_price_per_mtok() -> float:
 
 def llm_cache_read_price_per_mtok() -> float:
     return _bounded_float("LLM_CACHE_READ_PRICE_PER_MTOK", 0.10, 0.0, 1000.0)
+
+
+def llm_provider() -> str:
+    provider = os.environ.get("LLM_PROVIDER", "anthropic").strip().lower()
+    if provider not in {"anthropic", "openai"}:
+        raise ValueError("LLM_PROVIDER must be anthropic or openai")
+    return provider
+
+
+def llm_api_key() -> str | None:
+    value = os.environ.get(f"{llm_provider().upper()}_API_KEY", "").strip()
+    return value if value and value != "your_key_here" else None
+
+
+def llm_model() -> str:
+    if llm_provider() == "openai":
+        value = os.environ.get("OPENAI_MODEL", "").strip()
+        if not value:
+            raise ValueError("OPENAI_MODEL must be configured when LLM_PROVIDER=openai")
+        return value
+    return os.environ.get("ANTHROPIC_MODEL", ANTHROPIC_MODEL)
+
+
+def llm_timeout_seconds() -> float:
+    return _bounded_float("LLM_TIMEOUT_SECONDS", 30.0, 1.0, 120.0)
+
+
+def llm_max_retries() -> int:
+    return _bounded_int("LLM_MAX_RETRIES", 0, 0, 3)

@@ -1,149 +1,217 @@
 # EuroTrip Agent
 
-Minimal V0 travel planning app for European trips.
+A travel-planning app with a controlled workflow, English Wikivoyage retrieval,
+structured daily activities, OpenAI/Anthropic support and multilingual chat.
 
-## What V0 Does
+## Current architecture
 
-- Collects basic trip preferences
-- Uses local mock destination data
-- Returns 3 ranked destinations and one simple itinerary
-- Exposes a FastAPI backend
-- Provides a Streamlit frontend
+Specified and unspecified destinations use the same planner. Unspecified destinations
+first go through candidate discovery; all candidates receive a common overview analysis.
+Only selected destinations receive detailed research and a daily activity itinerary.
+Comparison-only requests skip itinerary generation. Revisions reuse the same capabilities,
+regenerate only affected scopes and commit a new version after validation.
 
-The current architecture keeps the Streamlit form as a structured debug surface while moving
-the backend toward a state-based planning engine. Form input is normalized into `PlanningState`;
-future chat input should use the same state boundary.
+See [current architecture](docs/current_architecture.md) for contracts, module boundaries,
+revision behavior, budgets, compatibility and limitations.
 
-V0 does not use a database, real external APIs, LangChain, or LangGraph.
+Optional real place resolution uses a bounded model-directed MCP node with Geoapify:
+see [setup and verification](docs/place_resolution.md). Start with
+`python -m scripts.test_places --discover` (no keys/network required).
 
-## Project Structure
+Read [MCP walkthrough](docs/mcp_walkthrough.md) for a conversation-to-code example.
+[Resume project notes](docs/resume_project.md) describe the implemented scope and limits.
+
+Multi-turn behavioral evaluation: `python -m scripts.eval_scenarios` (offline) or
+`python -m scripts.eval_scenarios --mode live --case paris_local_revision` (real API).
+See [scenario evaluation](docs/scenario_evaluation.md) for the 14 reference cases,
+assertions, reports, repeat runs and automation exit codes.
 
 ```text
-eurotrip-agent/
-  backend/
-    app/
-      main.py
-      models.py
-      planner.py
-      prompts.py
-      config.py
-  frontend/
-    streamlit_app.py
-  data/
-    destination_notes.json
-    user_preferences.json
-  tests/
-    test_planner.py
+backend/app/
+  planning_models.py       # Constraints, task, Day, Activity and revision contracts
+  task_builder.py          # Chat/form -> validated planning task
+  unified_planner.py       # Shared controlled scheduler
+  destination_analysis.py  # Overview and detailed analysis of one destination
+  plan_builder.py          # Selected/affected days -> structured activities
+  revision.py              # Interpret, scope and merge revisions
+  plan_validation.py       # Business validation and explicit uncertainty
+  plan_store.py            # Versioned repository interface and in-memory adapter
+  plan_renderer.py         # Activity objects -> compatibility day prose
+  tool_executor.py         # Registered typed read-only tools
+  execution.py             # Per-run deadline and admission budgets
+  llm.py                   # OpenAI Responses / Anthropic text adapter
+  knowledge.py             # English retrieval index
+  language.py              # User language and presentation translation
+  trajectory.py            # JSON/JSONL run records
+  chat.py / main.py         # API adapters and conversation handling
+frontend/streamlit_app.py   # Chat and structured activity display
 ```
 
-## Setup
+The legacy `agent.py` is unchanged and Anthropic-only; HTTP endpoints use the unified
+scheduler. Former fixed/ranked builders are compatibility adapters.
 
-Create and activate a virtual environment:
+## Setup and run
 
 ```bash
 python -m venv .venv
 source .venv/bin/activate
-```
-
-Install dependencies:
-
-```bash
-pip install fastapi uvicorn streamlit requests pytest
-```
-
-## Run The Backend
-
-```bash
+python -m pip install -r requirements.txt
+cp .env.example .env
 uvicorn backend.app.main:app --reload
 ```
 
-The API will be available at:
-
-```text
-http://127.0.0.1:8000
-```
-
-Interactive API docs:
-
-```text
-http://127.0.0.1:8000/docs
-```
-
-Optional LLM agent mode is controlled through `.env`:
+In another terminal:
 
 ```bash
-ENABLE_ANTHROPIC_AGENT=true
-ANTHROPIC_AGENT_MAX_TOKENS=4096
-ANTHROPIC_API_KEY=your_key_here
-```
-
-Set `ENABLE_ANTHROPIC_AGENT=false` to force the deterministic fallback.
-The backend reads `.env` when the process starts, so restart `uvicorn` after changing it.
-
-## Run The Frontend
-
-In a second terminal, with the same virtual environment active:
-
-```bash
+source .venv/bin/activate
 streamlit run frontend/streamlit_app.py
 ```
 
-## Candidate Discovery
+API: `http://127.0.0.1:8000`, docs: `/docs`. Restart the backend after `.env` changes.
+The Streamlit page disables developer cache shortcuts and bypasses system proxies for
+its local backend requests. On macOS use Command+C for native browser copying.
 
-V5.1 adds a debug endpoint for RAG candidate discovery:
+## LLM configuration
 
-```text
-POST http://127.0.0.1:8000/plan/candidates
+OpenAI:
+
+```dotenv
+LLM_PROVIDER=openai
+OPENAI_API_KEY=your_actual_api_key
+OPENAI_MODEL=gpt-5.4-mini
+LLM_TIMEOUT_SECONDS=30
+LLM_MAX_RETRIES=0
+LLM_TRUST_ENV=true
 ```
 
-It accepts the same JSON body as `/plan`, then returns `PlanningState` with
-`candidate_destinations` and supporting `evidence` populated from the local Wikivoyage index.
+Anthropic is the default when `LLM_PROVIDER` is omitted:
 
-V5.1 also adds ranked candidate debugging:
-
-```text
-POST http://127.0.0.1:8000/plan/ranked-candidates
+```dotenv
+LLM_PROVIDER=anthropic
+ANTHROPIC_API_KEY=your_actual_api_key
+ANTHROPIC_MODEL=claude-haiku-4-5-20251001
 ```
 
-This runs discovery, then scores candidates with a visible `score_breakdown` for retrieval,
-budget, transport, interests, taste, and season.
+Only the selected provider's key enables calls. Without a key the app still returns
+comparisons and structured placeholders marked `needs_verification`. OpenAI requires an
+explicit model available to your account and uses Responses API with `store=false`.
 
-When the LLM agent is disabled or unavailable, `/plan` now tries the RAG-ranked planning path
-first. It falls back to the legacy deterministic planner only if RAG planning cannot produce
-ranked candidates.
+`ENABLE_LLM_RAG_ENHANCEMENTS=false` disables dynamic discovery query research, not routing
+or itinerary writing. `LLM_TRUST_ENV=false` bypasses outbound proxies where a direct
+connection is appropriate. The deprecated `ENABLE_ANTHROPIC_AGENT` flag is not used by API.
 
-RAG-ranked destination cards include `citations` with Wikivoyage source URLs. The Streamlit UI
-renders these as source links under each destination.
+Optional OpenAI model-specific prices in USD per million tokens:
 
-Final plans also include `tradeoff_summary`, `filtered_candidates`, and destination-level
-`score_breakdown` so ranking decisions are visible in the UI.
-
-## Chat API
-
-The chat endpoint is the primary natural-language entry point:
-
-```text
-POST http://127.0.0.1:8000/chat
+```dotenv
+OPENAI_INPUT_PRICE_PER_MTOK=0.75
+OPENAI_OUTPUT_PRICE_PER_MTOK=4.50
+OPENAI_CACHE_READ_PRICE_PER_MTOK=0.075
 ```
 
-Send a user message and, on later turns, pass back the returned `extracted_fields`.
-The endpoint first runs a task router. It currently supports:
+Verify prices for the chosen model. Missing prices yield null cost estimates. Anthropic
+uses `LLM_*_PRICE_PER_MTOK`. OpenAI cached input is counted within total input and billed once.
 
-- destination recommendation, using the existing RAG-ranked planning engine
-- fixed-destination itinerary planning, for messages like `3 days in Paris`
-- clarification, when required fields are missing
+Run bounds (defaults):
 
-When `ANTHROPIC_API_KEY` is present, the router can use an LLM to produce a structured
-strategy decision. Without a key, it falls back to deterministic routing rules.
+```dotenv
+RUN_TIMEOUT_SECONDS=180
+RUN_MAX_LLM_CALLS=12
+RUN_MAX_TOOL_CALLS=40
+RUN_MAX_OUTPUT_TOKENS=32000
+RAG_RESEARCH_MAX_ROUNDS=3
+RAG_RESEARCH_QUERIES_PER_ROUND=3
+RAG_RESEARCH_MAX_CANDIDATES=8
+```
 
-The Streamlit app uses this chat endpoint as the main interface and keeps
-`conversation_id`, `extracted_fields`, chat history, and the latest plan in `st.session_state`.
+## API and examples
 
-The structured `/plan` endpoint is still available as a debug/regression surface for the
-destination recommendation workflow.
+`POST /chat` is the primary natural-language surface:
 
-## Run Tests
+```json
+{"message":"计划三日巴黎游 美食 文化 时尚"}
+```
+
+Other examples:
+
+- `从慕尼黑出发玩三天，预算900欧元，美食文化，火车，节奏适中，请推荐目的地并安排具体行程`
+- `先比较几个城市，美食文化` with `requested_output="options"`
+- `第二天下午换成购物，晚餐保留` with the previous `conversation_id`
+- `添加第二天下午的购物活动`
+
+`response_language="zh"` or another language code explicitly controls presentation.
+Language detection is heuristic. Numbers/dates preserve the conversation's language.
+Canonical city names and interests remain English; source excerpts and trace remain
+original. Non-English prose rendering uses an additional recorded LLM call. Without a
+configured LLM, full plan translation is unavailable and Chinese users receive a notice.
+
+For precise revisions:
+
+```json
+{
+  "conversation_id": "existing-conversation-id",
+  "message": "Replace the selected activity",
+  "expected_plan_version": 1,
+  "revision": {
+    "base_plan_id": "existing-plan-id",
+    "base_version": 1,
+    "changes": [
+      {
+        "action": "replace",
+        "activity_ids": ["existing-activity-id"],
+        "category": "shopping",
+        "requirements": "Keep the afternoon light"
+      }
+    ],
+    "preserve_activity_ids": ["existing-dinner-id"]
+  }
+}
+```
+
+`constraints_updates` supports fields such as destination, trip_length, start_date,
+budget and interests. Dates use ISO `YYYY-MM-DD`; budget and curated costs are in EUR.
+Unknown item prices, durations and locations remain null. Numerical estimates come from
+curated data/tools rather than model guesses.
+
+`POST /plan` keeps the structured `TripRequest` interface and accepts optional destination,
+candidate_destinations, requested_output and response_language. Debug APIs `/plan/candidates`
+and `/plan/ranked-candidates` use the same resolution/overview analysis rules.
+
+Read canonical versions with `GET /plans/{plan_id}` or `?version=1`. Stale version conflicts
+return 409; invalid drafts return 422; exhausted execution budgets return 503. Plan/session
+storage is currently single-process memory, so restart loses history. Persisted trajectories
+are diagnostics and do not provide execution recovery.
+
+## Trajectory and verification
+
+Every chat response includes `run_id`, `planning_task` and `trajectory`. Download the latest
+JSON in Streamlit. The backend writes `<run_id>.traj.json` and incremental
+`<run_id>.events.jsonl` under `data/trajectories/`; override with `TRAJECTORY_DIR`.
+Credentials are redacted, user messages/evidence are included and files are Git-ignored.
+SDK call timing includes internal retries; individual SDK attempts are not observed.
 
 ```bash
-pytest
+# Offline tests; no real keys or model downloads used by fixtures
+PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -p no:capture -q tests
+# Real configured-provider smoke tests (billable API calls)
+python -m scripts.test_llm
+python -m scripts.test_llm --chat
+python -m scripts.test_llm --chat --message '计划三日巴黎游 美食 文化 时尚' \
+  --revision-message '第二天下午换成购物，晚餐保留'
 ```
+
+The revision smoke checks versions and exact preservation of unaffected days/explicitly
+preserved activities. Missing credentials/model exit 2; fallback or failed checks exit 1.
+
+Build the English corpus index separately when needed:
+
+```bash
+python scripts/build_index.py
+```
+
+## Practical limits
+
+The system validates structure, identity, city/evidence consistency, preservation and
+estimated constraints. It does not prove factual entailment or verify live venue opening
+hours, reservations and travel connections. Activity statuses and validation warnings
+expose that uncertainty. External writes, MCP, LangGraph and multi-agent orchestration
+are extension points, not enabled features.

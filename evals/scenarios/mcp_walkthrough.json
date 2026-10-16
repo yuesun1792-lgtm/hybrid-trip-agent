@@ -1,0 +1,71 @@
+{
+  "schema_version": "1.0",
+  "scenarios": [
+    {
+      "id": "mcp_create_and_revise",
+      "description": "Learning walkthrough: full chat planning, real MCP place resolution, then scoped revision. Requires live mode and place resolution enabled.",
+      "turns": [
+        {
+          "message": "Plan 1 day in Paris for art and culture, with exactly two activities: Louvre Museum in the morning and Eiffel Tower in the afternoon. Use a relaxed pace. Return a concrete itinerary.",
+          "request": {
+            "response_language": "en"
+          },
+          "expect": {
+            "outcome": "plan",
+            "destination": "Paris",
+            "day_count": 1,
+            "place_status": "completed",
+            "min_resolved_activities": 2,
+            "max_place_tool_calls": 12,
+            "activity_checks": [
+              {
+                "day": 1,
+                "time_slot": "morning",
+                "min_count": 1,
+                "max_count": 1
+              },
+              {
+                "day": 1,
+                "time_slot": "afternoon",
+                "min_count": 1,
+                "max_count": 1
+              }
+            ]
+          }
+        },
+        {
+          "message": "Replace day 1 afternoon with Musee d'Orsay. Keep the morning activity unchanged.",
+          "request": {
+            "response_language": "en"
+          },
+          "expect": {
+            "outcome": "revision",
+            "destination": "Paris",
+            "day_count": 1,
+            "changed_days": [
+              1
+            ],
+            "version_increment": 1,
+            "place_status": "completed",
+            "min_resolved_activities": 2,
+            "max_place_tool_calls": 12,
+            "activity_checks": [
+              {
+                "day": 1,
+                "time_slot": "morning",
+                "min_count": 1,
+                "max_count": 1
+              },
+              {
+                "day": 1,
+                "time_slot": "afternoon",
+                "min_count": 1,
+                "max_count": 1
+              }
+            ]
+          }
+        }
+      ]
+    }
+  ]
+}

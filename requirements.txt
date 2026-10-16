@@ -9,3 +9,9 @@ numpy>=1.26.0
 anthropic==0.104.0
 # Optional — only needed to run scripts/build_index.py (model downloads ~80 MB once)
 sentence-transformers>=2.7.0
+
+# Optional — needed when LLM_PROVIDER=openai
+openai>=2.0.0,<4.0.0
+
+# Place resolution MCP client/server (v1 SDK protocol implementation)
+mcp>=1.26,<2.0

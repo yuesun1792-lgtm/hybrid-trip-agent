@@ -1,0 +1,40 @@
+{
+  "schema_version": "1.0",
+  "scenarios": [
+    {
+      "id": "named_paris_places",
+      "description": "Live only: enable place resolution and configure both model/Geoapify keys.",
+      "turns": [
+        {
+          "message": "Plan one day in Paris for art and culture. Include the Louvre Museum and Eiffel Tower as named activities.",
+          "request": {"response_language": "en"},
+          "expect": {"outcome": "plan", "destination": "Paris", "day_count": 1, "place_status": "completed", "min_resolved_activities": 1, "max_place_tool_calls": 12}
+        }
+      ]
+    },
+    {
+      "id": "place_revision_preservation",
+      "turns": [
+        {
+          "message": "Plan two days in Paris for art and food. Include Louvre Museum, Eiffel Tower, and Musee d'Orsay as specific activities. Include dinner both evenings.",
+          "request": {"response_language": "en"},
+          "expect": {"outcome": "plan", "day_count": 2, "min_resolved_activities": 1}
+        },
+        {
+          "message": "Replace day 2 afternoon with shopping at Galeries Lafayette Haussmann, preserve dinner.",
+          "expect": {"outcome": "revision", "changed_days": [2], "preserve_other_days": true, "preserve_evening": true, "version_increment": 1, "max_place_tool_calls": 12}
+        }
+      ]
+    },
+    {
+      "id": "options_skip_place_tools",
+      "turns": [
+        {
+          "message": "Compare European cities for food and culture. Options only, without an itinerary.",
+          "request": {"requested_output": "options", "response_language": "en"},
+          "expect": {"outcome": "plan", "output": "options", "day_count": 0, "min_resolved_activities": 0, "max_place_tool_calls": 0}
+        }
+      ]
+    }
+  ]
+}

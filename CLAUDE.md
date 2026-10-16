@@ -1,5 +1,27 @@
 # CLAUDE.md — EuroTrip Agent
 
+## Current architecture (2026-10-15)
+
+Read `docs/current_architecture.md` and `README.md` first. They describe the current runtime;
+the V0–V6 notes and `docs/architecture_review.md` below are historical context.
+
+The HTTP endpoints use one scheduler (`unified_planner.py`) for candidate discovery,
+confirmed cities and revisions. Canonical `Day`/`Activity` contracts, lightweight versus
+detailed analysis, targeted revision merging, validation, optimistic version commits,
+registered read-only tools, per-run budgets, multilingual presentation and trajectory
+are implemented. `fixed_itinerary.py`/`rag_plan_builder.py` are compatibility adapters.
+Committed business state stays separate from translated presentation. Plan/session
+storage is in-memory and single-process; JSON trajectories are diagnostics, not durable
+checkpoints. No LangChain/LangGraph/multi-agent runtime or database is added. An optional
+bounded native-tool-calling node resolves places through a local stdio MCP server backed
+by Geoapify; see `docs/place_resolution.md`. Existing RAG/mock transport stay local. The
+legacy Anthropic `agent.py` loop remains unchanged and is not used by HTTP planning.
+
+Validation: `PYTEST_DISABLE_PLUGIN_AUTOLOAD=1 python -m pytest -p no:capture -q tests`.
+Fixtures disable real credentials and model downloads; real-provider verification uses
+`python -m scripts.test_llm --chat [--revision-message '...']`.
+
+
 ## Project purpose
 
 A learning-oriented project that builds a travel-planning agent one version at a time.

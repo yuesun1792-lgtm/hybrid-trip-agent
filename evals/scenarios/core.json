@@ -1,0 +1,387 @@
+{
+  "schema_version": "1.0",
+  "scenarios": [
+    {
+      "id": "paris_local_revision",
+      "description": "Known destination, then afternoon replacement preserving dinner and other days.",
+      "turns": [
+        {
+          "message": "计划巴黎三日游，喜欢美食和文化，节奏适中",
+          "expect": {
+            "outcome": "plan",
+            "destination": "Paris",
+            "day_count": 3,
+            "language": "zh",
+            "detailed_count": 1
+          }
+        },
+        {
+          "message": "第二天下午不要博物馆，换成购物，晚餐保留",
+          "expect": {
+            "outcome": "revision",
+            "changed_days": [
+              2
+            ],
+            "preserve_other_days": true,
+            "preserve_evening": true,
+            "version_increment": 1,
+            "activity_checks": [
+              {
+                "day": 2,
+                "time_slot": "afternoon",
+                "category": "shopping"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "discover_options",
+      "turns": [
+        {
+          "message": "从慕尼黑出发玩三天，预算900欧元，喜欢美食文化，火车，先比较目的地，不要具体行程",
+          "request": {
+            "requested_output": "options"
+          },
+          "expect": {
+            "outcome": "plan",
+            "output": "options",
+            "day_count": 0,
+            "min_candidates": 2,
+            "detailed_count": 0
+          }
+        }
+      ]
+    },
+    {
+      "id": "discover_itinerary",
+      "turns": [
+        {
+          "message": "从慕尼黑出发玩三天，预算900欧元，喜欢美食文化，火车，节奏适中，请推荐目的地并安排具体行程",
+          "expect": {
+            "outcome": "plan",
+            "output": "itinerary",
+            "day_count": 3,
+            "min_candidates": 2,
+            "detailed_count": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "options_to_plan",
+      "turns": [
+        {
+          "message": "喜欢美食文化，先比较几个城市，不要行程",
+          "request": {
+            "requested_output": "options"
+          },
+          "expect": {
+            "outcome": "plan",
+            "output": "options",
+            "day_count": 0
+          }
+        },
+        {
+          "message": "选择巴黎，安排三天具体行程",
+          "expect": {
+            "outcome": "plan",
+            "destination": "Paris",
+            "day_count": 3,
+            "output": "itinerary"
+          }
+        }
+      ]
+    },
+    {
+      "id": "missing_duration",
+      "turns": [
+        {
+          "message": "计划巴黎美食文化之旅",
+          "expect": {
+            "outcome": "clarification"
+          }
+        },
+        {
+          "message": "三天",
+          "expect": {
+            "outcome": "plan",
+            "destination": "Paris",
+            "day_count": 3
+          }
+        }
+      ]
+    },
+    {
+      "id": "relax_preserve_dinner",
+      "turns": [
+        {
+          "message": "计划巴黎三日游，美食文化",
+          "expect": {
+            "outcome": "plan",
+            "day_count": 3
+          }
+        },
+        {
+          "message": "第二天太赶，减少活动，但晚餐保留",
+          "expect": {
+            "outcome": "revision",
+            "changed_days": [
+              2
+            ],
+            "preserve_other_days": true,
+            "preserve_evening": true,
+            "version_increment": 1,
+            "fewer_activities_days": [
+              2
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "change_destination",
+      "turns": [
+        {
+          "message": "计划巴黎三日游，美食文化",
+          "expect": {
+            "outcome": "plan",
+            "destination": "Paris"
+          }
+        },
+        {
+          "message": "目的地改为罗马，仍然三天",
+          "request": {
+            "revision": {
+              "constraints_updates": {
+                "destination": "Rome"
+              }
+            }
+          },
+          "expect": {
+            "outcome": "revision",
+            "destination": "Rome",
+            "day_count": 3,
+            "version_increment": 1
+          }
+        }
+      ]
+    },
+    {
+      "id": "budget_only",
+      "turns": [
+        {
+          "message": "计划巴黎三日游，美食文化，预算900欧元",
+          "expect": {
+            "outcome": "plan"
+          }
+        },
+        {
+          "message": "预算提高到1500欧元",
+          "request": {
+            "revision": {
+              "constraints_updates": {
+                "budget": 1500
+              }
+            }
+          },
+          "expect": {
+            "outcome": "revision",
+            "changed_days": [],
+            "preserve_other_days": true,
+            "version_increment": 1,
+            "constraints": {
+              "budget": 1500
+            }
+          }
+        }
+      ]
+    },
+    {
+      "id": "long_trip",
+      "turns": [
+        {
+          "message": "计划巴黎七日游，美食文化，节奏轻松",
+          "expect": {
+            "outcome": "plan",
+            "destination": "Paris",
+            "day_count": 7
+          }
+        }
+      ]
+    },
+    {
+      "id": "invalid_duration",
+      "turns": [
+        {
+          "message": "计划巴黎0天游，美食文化",
+          "expect": {
+            "outcome": "clarification"
+          }
+        },
+        {
+          "message": "三天",
+          "expect": {
+            "outcome": "plan",
+            "day_count": 3,
+            "destination": "Paris"
+          }
+        }
+      ]
+    },
+    {
+      "id": "stale_version",
+      "turns": [
+        {
+          "message": "计划巴黎三日游，美食文化",
+          "expect": {
+            "outcome": "plan"
+          }
+        },
+        {
+          "message": "预算提高到1500欧元",
+          "request": {
+            "revision": {
+              "constraints_updates": {
+                "budget": 1500
+              }
+            }
+          },
+          "expect": {
+            "outcome": "revision",
+            "version_increment": 1
+          }
+        },
+        {
+          "message": "第二天减少活动",
+          "request": {
+            "expected_plan_version": 1
+          },
+          "expect": {
+            "outcome": "error",
+            "error_type": "PlanVersionConflict"
+          }
+        }
+      ]
+    },
+    {
+      "id": "add_activity",
+      "turns": [
+        {
+          "message": "计划巴黎三日游，美食文化",
+          "expect": {
+            "outcome": "plan",
+            "day_count": 3
+          }
+        },
+        {
+          "message": "第二天下午新增购物活动",
+          "request": {
+            "revision": {
+              "changes": [
+                {
+                  "action": "add",
+                  "day_numbers": [
+                    2
+                  ],
+                  "time_slot": "afternoon",
+                  "category": "shopping",
+                  "requirements": "Add shopping"
+                }
+              ]
+            }
+          },
+          "expect": {
+            "outcome": "revision",
+            "changed_days": [
+              2
+            ],
+            "preserve_other_days": true,
+            "version_increment": 1,
+            "activity_checks": [
+              {
+                "day": 2,
+                "category": "shopping"
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "remove_activity",
+      "turns": [
+        {
+          "message": "计划巴黎三日游，美食文化",
+          "expect": {
+            "outcome": "plan",
+            "day_count": 3
+          }
+        },
+        {
+          "message": "删除第二天下午的活动",
+          "request": {
+            "revision": {
+              "changes": [
+                {
+                  "action": "remove",
+                  "day_numbers": [
+                    2
+                  ],
+                  "time_slot": "afternoon"
+                }
+              ]
+            }
+          },
+          "expect": {
+            "outcome": "revision",
+            "changed_days": [
+              2
+            ],
+            "preserve_other_days": true,
+            "version_increment": 1,
+            "activity_checks": [
+              {
+                "day": 2,
+                "time_slot": "afternoon",
+                "min_count": 0,
+                "max_count": 0
+              }
+            ]
+          }
+        }
+      ]
+    },
+    {
+      "id": "extend_duration",
+      "turns": [
+        {
+          "message": "计划巴黎三日游，美食文化",
+          "expect": {
+            "outcome": "plan",
+            "day_count": 3
+          }
+        },
+        {
+          "message": "改为五天",
+          "request": {
+            "revision": {
+              "constraints_updates": {
+                "trip_length": 5
+              }
+            }
+          },
+          "expect": {
+            "outcome": "revision",
+            "day_count": 5,
+            "version_increment": 1,
+            "constraints": {
+              "trip_length": 5
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

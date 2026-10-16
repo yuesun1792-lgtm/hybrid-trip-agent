@@ -115,6 +115,9 @@ def search_travel_knowledge(
     Returns up to k dicts: {text, score, destination, section, url}.
     Returns [] if the index hasn't been built yet (graceful degradation).
     """
+    if destination:
+        from backend.app.destination_names import canonical_destination
+        destination = canonical_destination(destination)
     index = _load_index()
     if not index:
         return []
@@ -133,14 +136,15 @@ def search_travel_knowledge(
     q_norm    = np.linalg.norm(query_vec) + 1e-10
     sims = (embeddings / emb_norms) @ (query_vec / q_norm)  # (N,)
 
-    # Optional destination filter — fall back to global search if nothing matches
+    # A fixed destination must never silently broaden to other cities.
     if destination:
         dest_lower = destination.strip().lower()
         mask = np.array(
             [m.get("destination", "").lower() == dest_lower for m in metadata]
         )
-        if mask.sum() > 0:
-            sims = np.where(mask, sims, -2.0)
+        if not mask.any():
+            return []
+        sims = np.where(mask, sims, -2.0)
 
     k = min(k, 10)
     top_idx = np.argsort(sims)[::-1][:k]

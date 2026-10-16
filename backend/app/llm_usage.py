@@ -1,3 +1,5 @@
+import os
+import math
 from typing import Any
 
 from backend.app.config import (
@@ -32,23 +34,34 @@ def _cost_usd(
     return round(cost, 8)
 
 
-def usage_from_response(stage: str, model: str, response: Any) -> LLMUsage:
+def usage_from_response(stage: str, model: str, response: Any, provider: str = "anthropic") -> LLMUsage:
     usage = getattr(response, "usage", None)
     input_tokens = _usage_value(usage, "input_tokens")
     output_tokens = _usage_value(usage, "output_tokens")
     cache_creation_input_tokens = _usage_value(usage, "cache_creation_input_tokens")
     cache_read_input_tokens = _usage_value(usage, "cache_read_input_tokens")
+    cost = _cost_usd(input_tokens, output_tokens, cache_creation_input_tokens, cache_read_input_tokens)
+    if provider == "openai":
+        cache_creation_input_tokens = 0
+        cache_read_input_tokens = _usage_value(getattr(usage, "input_tokens_details", None), "cached_tokens")
+        # OpenAI input_tokens includes cached tokens; do not bill them twice.
+        cost = None
+        try:
+            input_price = float(os.environ["OPENAI_INPUT_PRICE_PER_MTOK"])
+            output_price = float(os.environ["OPENAI_OUTPUT_PRICE_PER_MTOK"])
+            cache_price = float(os.environ["OPENAI_CACHE_READ_PRICE_PER_MTOK"]) if cache_read_input_tokens else 0.0
+            if all(math.isfinite(v) and v >= 0 for v in (input_price, output_price, cache_price)):
+                cost = round(((input_tokens - cache_read_input_tokens) * input_price
+                              + cache_read_input_tokens * cache_price + output_tokens * output_price) / 1_000_000, 8)
+        except (KeyError, ValueError):
+            pass
     return LLMUsage(
+        provider=provider,
         stage=stage,
         model=model,
         input_tokens=input_tokens,
         output_tokens=output_tokens,
         cache_creation_input_tokens=cache_creation_input_tokens,
         cache_read_input_tokens=cache_read_input_tokens,
-        estimated_cost_usd=_cost_usd(
-            input_tokens,
-            output_tokens,
-            cache_creation_input_tokens,
-            cache_read_input_tokens,
-        ),
+        estimated_cost_usd=cost,
     )

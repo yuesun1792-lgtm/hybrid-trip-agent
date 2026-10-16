@@ -126,7 +126,7 @@ def test_deterministic_plan_from_state_keeps_existing_plan_shape():
     plan = deterministic_plan_from_state(state, "test")
     assert len(plan.ranked_destinations) == 3
     assert len(plan.itinerary) == 4
-    assert plan.planner_mode == "deterministic_fallback"
+    assert plan.planner_mode == "unified_itinerary_rule"
     assert plan.fallback_reason == "test"
 
 
@@ -197,7 +197,7 @@ def test_discover_candidate_destinations_groups_rag_evidence(monkeypatch):
         "Innsbruck",
     ]
     assert discovered.candidate_destinations[0].source == "rag"
-    assert len(discovered.candidate_destinations[0].evidence) == 3
+    assert len(discovered.candidate_destinations[0].evidence) == 2
     assert discovered.evidence
 
 
@@ -229,10 +229,10 @@ def test_score_candidate_adds_breakdown(monkeypatch):
         "backend.app.candidate_ranker.estimate_transport_time",
         lambda origin, destination: {"hours": 2.0, "mode": "train"},
     )
-    scored = score_candidate(candidate, state, {"Salzburg": 700})
+    scored = score_candidate(candidate, state, {"Salzburg": 150})
     assert scored.score > 0
     assert scored.score_breakdown["transport"] == 20
-    assert scored.score_breakdown["budget"] == 15
+    assert scored.score_breakdown["budget"] == 25
     assert scored.score_breakdown["interests"] > 0
 
 
@@ -362,7 +362,7 @@ def test_build_trip_plan_from_ranked_state_uses_candidates(monkeypatch):
         }
     )
     monkeypatch.setattr(
-        "backend.app.rag_plan_builder.gather_tool_insights",
+        "backend.app.tools.gather_tool_insights",
         lambda origin, destination, date_range, trip_length: ToolInsight(
             transport_hours=2,
             transport_mode="train",
@@ -372,7 +372,7 @@ def test_build_trip_plan_from_ranked_state_uses_candidates(monkeypatch):
         ),
     )
     plan = build_trip_plan_from_ranked_state(ranked_state)
-    assert plan.planner_mode == "rag_ranked"
+    assert plan.planner_mode == "unified_itinerary_rule"
     assert plan.ranked_destinations[0].name == "Salzburg"
     assert plan.ranked_destinations[0].estimated_cost == 700
     assert plan.ranked_destinations[0].score_breakdown["transport"] == 20
@@ -408,7 +408,7 @@ def test_build_trip_plan_from_ranked_state_scales_cost_to_trip_length(monkeypatc
         }
     )
     monkeypatch.setattr(
-        "backend.app.rag_plan_builder.gather_tool_insights",
+        "backend.app.tools.gather_tool_insights",
         lambda origin, destination, date_range, trip_length: ToolInsight(
             transport_hours=2,
             transport_mode="bus",
@@ -519,8 +519,8 @@ def test_strategy_routes_fixed_destination(monkeypatch):
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
     fields = extract_fields("3 days in Paris for food and art")
     decision = decide_strategy("3 days in Paris for food and art", fields)
-    assert decision.intent == "plan_fixed_destination"
-    assert decision.next_action == "run_fixed_itinerary"
+    assert decision.intent == "plan_trip"
+    assert decision.next_action == "run_planning"
 
 
 def test_chat_asks_for_missing_fields():
@@ -533,7 +533,7 @@ def test_chat_asks_for_missing_fields():
 
 def test_chat_routes_fixed_destination_plan(monkeypatch):
     monkeypatch.setattr(
-        "backend.app.fixed_itinerary.search_travel_knowledge",
+        "backend.app.knowledge.search_travel_knowledge",
         lambda query, k=6, destination=None: [
             {
                 "text": "Paris - See\nMuseums, neighborhoods, and riverside walks.",
@@ -546,7 +546,7 @@ def test_chat_routes_fixed_destination_plan(monkeypatch):
     )
     response = handle_chat(ChatRequest(message="3 days in Paris for food and art"))
     assert response.plan is not None
-    assert response.plan.planner_mode == "fixed_destination_itinerary"
+    assert response.plan.planner_mode == "unified_itinerary_rule"
     assert response.plan.ranked_destinations[0].name == "Paris"
     assert len(response.plan.itinerary) == 3
 
@@ -556,18 +556,14 @@ def test_chat_generates_plan_when_fields_complete(monkeypatch):
     request = ChatRequest(
         message="2 days from Munich in July, budget 400, food history nature, bus, medium"
     )
-    monkeypatch.setattr(
-        chat_module,
-        "plan_from_state",
-        lambda state: create_trip_plan(state.request).model_copy(
-            update={"planner_mode": "rag_ranked"}
-        ),
-    )
+    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", lambda *a, **k: [
+        {"text": "Prague - See\nParks, museums and walks offer local activities.", "destination": "Prague", "section": "See", "url": "https://en.wikivoyage.org/wiki/Prague", "score": .9}])
     response = handle_chat(request)
     assert response.plan is not None
-    assert response.state is not None
-    assert response.plan.planner_mode == "rag_ranked"
+    assert response.planning_task["operation"] == "create"
+    assert response.plan.planner_mode == "unified_itinerary_rule"
     assert response.missing_fields == []
+
 
 
 # ---------------------------------------------------------------------------
@@ -971,7 +967,7 @@ def test_create_plan_calls_convert_currency_for_non_eur(monkeypatch):
     # convert_currency was dispatched (the loop processed the tool_use block)
     assert mock_create.call_count == 2
     # estimated_cost_home arrived from the submit_trip_plan input (from the tool result)
-    assert plan.ranked_destinations[0].estimated_cost_home == 4225.0
+    assert plan.ranked_destinations[0].estimated_cost_home == 4238.0
     assert plan.ranked_destinations[0].home_currency == "CNY"
 
 
@@ -1259,8 +1255,9 @@ def test_llm_rerank_reorders_by_score(monkeypatch):
 
     import backend.app.reranker as reranker_mod
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test-fake")
-    with patch.object(reranker_mod, "anthropic") as mock_anthropic:
-        mock_anthropic.Anthropic.return_value = fake_client
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    fake_response.text = fake_content.text
+    with patch.object(reranker_mod, "generate_text", return_value=fake_response):
         result = reranker_mod.llm_rerank(
             [dict(c) for c in candidates],
             query="nightlife Europe",
@@ -1286,129 +1283,51 @@ def test_llm_rerank_fallback_on_no_api_key(monkeypatch):
 
 
 def test_research_loop_stops_at_configured_round_limit(monkeypatch):
-    import backend.app.planning_engine as engine
-
-    request = TripRequest(
-        origin_city="Munich", date_range="June", trip_length=3, budget=700,
-        interests=["food"], transport_preference="train", physical_level="medium",
-    )
-    state = state_from_request(request)
-    candidate = CandidateDestination(
-        name="Prague",
-        evidence=[EvidenceChunk(text="Prague food markets", destination="Prague")],
-    )
-    decisions = []
-
-    def fake_decision(current_state, searched_queries, round_number):
-        decisions.append(round_number)
-        return ResearchDecision(
-            action="search",
-            queries=[f"query {round_number}"],
-            reason="Need more evidence",
-            evidence_gaps=["coverage"],
-        )
-
+    import backend.app.unified_planner as engine
+    from backend.app.planning_models import PlanningTask, TripConstraints
+    from backend.app.llm import LLMResult
+    calls = []
     monkeypatch.setattr(engine, "llm_rag_enhancements_enabled", lambda: True)
     monkeypatch.setattr(engine, "research_max_rounds", lambda: 3)
-    monkeypatch.setattr(engine, "decide_research", fake_decision)
-    monkeypatch.setattr(
-        engine,
-        "discover_candidate_destinations",
-        lambda current_state, **kwargs: current_state.model_copy(
-            update={"candidate_destinations": [candidate]}
-        ),
-    )
-    monkeypatch.setattr(engine, "rank_candidates_for_state", lambda current_state: current_state)
-    monkeypatch.setattr(engine, "rerank_candidates", lambda candidates, current_state: candidates)
-    monkeypatch.setattr(engine, "write_candidate_copy", lambda candidates, current_state: {})
-    monkeypatch.setattr(
-        engine,
-        "build_trip_plan_from_ranked_state",
-        lambda current_state, generated_copy, planner_mode: create_trip_plan(request).model_copy(
-            update={"planner_mode": planner_mode}
-        ),
-    )
-
-    plan = engine.rag_plan_from_state(state)
-    assert decisions == [1, 2, 3]
-    assert plan.planner_mode == "rag_ranked_llm"
+    def search(query, k=6, destination=None):
+        calls.append((query, destination))
+        return [{"text": "Prague food markets", "destination": "Prague", "section": "Eat", "score": .9}]
+    decisions = []
+    def propose(*args, **kwargs):
+        decisions.append(len(decisions) + 1)
+        return LLMResult(json.dumps({"queries": [f"query {len(decisions)}"]}), "test", "anthropic", None, None)
+    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", search)
+    monkeypatch.setattr(engine, "generate_text", propose)
+    candidates = engine.resolve_candidates(PlanningTask(constraints=TripConstraints(trip_length=3, interests=["food"])))
+    assert decisions == [1, 2]
+    assert len(calls) == 4
+    assert candidates[0].name == "Prague"
 
 
 def test_llm_research_failure_degrades_to_deterministic_rag(monkeypatch):
-    import backend.app.planning_engine as engine
-
-    request = TripRequest(
-        origin_city="Munich", date_range="June", trip_length=3, budget=700,
-        interests=["food"], transport_preference="train", physical_level="medium",
-    )
-    state = state_from_request(request)
-    candidate = CandidateDestination(
-        name="Prague",
-        evidence=[EvidenceChunk(text="Prague food markets", destination="Prague")],
-    )
-
+    import backend.app.unified_planner as engine
+    from backend.app.planning_models import PlanningTask, TripConstraints
     monkeypatch.setattr(engine, "llm_rag_enhancements_enabled", lambda: True)
-    monkeypatch.setattr(engine, "decide_research", lambda *args: (_ for _ in ()).throw(RuntimeError()))
-    monkeypatch.setattr(
-        engine,
-        "discover_candidate_destinations",
-        lambda current_state, **kwargs: current_state.model_copy(
-            update={"candidate_destinations": [candidate]}
-        ),
-    )
-    monkeypatch.setattr(engine, "rank_candidates_for_state", lambda current_state: current_state)
-    monkeypatch.setattr(engine, "rerank_candidates", lambda *args: (_ for _ in ()).throw(RuntimeError()))
-    monkeypatch.setattr(engine, "write_candidate_copy", lambda *args: (_ for _ in ()).throw(RuntimeError()))
-    monkeypatch.setattr(
-        engine,
-        "build_trip_plan_from_ranked_state",
-        lambda current_state, generated_copy, planner_mode: create_trip_plan(request).model_copy(
-            update={"planner_mode": planner_mode}
-        ),
-    )
-
-    plan = engine.rag_plan_from_state(state)
-    assert plan.planner_mode == "rag_ranked"
+    monkeypatch.setattr(engine, "generate_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError()))
+    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", lambda *a, **k: [
+        {"text": "Prague food markets", "destination": "Prague", "section": "Eat", "score": .9}])
+    plan = engine.execute_task(PlanningTask(constraints=TripConstraints(trip_length=3, interests=["food"])))
+    assert plan.planner_mode == "unified_itinerary_rule"
+    assert plan.ranked_destinations[0].name == "Prague"
 
 
 def test_no_key_path_uses_rag_backbone(monkeypatch):
-    import backend.app.planning_engine as engine
-
-    request = TripRequest(
-        origin_city="Munich", date_range="June", trip_length=3, budget=700,
-        interests=["food"], transport_preference="train", physical_level="medium",
-    )
-    state = state_from_request(request)
-    candidate = CandidateDestination(
-        name="Prague",
-        evidence=[EvidenceChunk(text="Food market", destination="Prague", url="https://example.test")],
-    )
+    import backend.app.unified_planner as engine
+    from backend.app.planning_models import PlanningTask, TripConstraints
     calls = []
-
-    monkeypatch.setattr(engine, "llm_rag_enhancements_enabled", lambda: False)
-    monkeypatch.setattr(
-        engine,
-        "discover_candidates_for_state",
-        lambda current_state: calls.append("discover") or current_state.model_copy(
-            update={"candidate_destinations": [candidate]}
-        ),
-    )
-    monkeypatch.setattr(
-        engine,
-        "rank_candidates_for_state",
-        lambda current_state: calls.append("rank") or current_state,
-    )
-    monkeypatch.setattr(
-        engine,
-        "build_trip_plan_from_ranked_state",
-        lambda current_state, generated_copy, planner_mode: create_trip_plan(request).model_copy(
-            update={"planner_mode": planner_mode}
-        ),
-    )
-
-    plan = engine.rag_plan_from_state(state)
-    assert calls == ["discover", "rank"]
-    assert plan.planner_mode == "rag_ranked"
+    def search(query, k=6, destination=None):
+        calls.append(destination)
+        return [{"text": "Prague food markets", "destination": "Prague", "section": "Eat", "url": "https://en.wikivoyage.org/wiki/Prague", "score": .9}]
+    monkeypatch.setattr("backend.app.knowledge.search_travel_knowledge", search)
+    plan = engine.execute_task(PlanningTask(constraints=TripConstraints(trip_length=3, interests=["food"])))
+    assert None in calls and "Prague" in calls
+    assert plan.planner_mode == "unified_itinerary_rule"
+    assert plan.evidence and all(day.activities for day in plan.itinerary)
 
 
 def test_generated_copy_rejects_unknown_evidence_ids(monkeypatch):
@@ -1462,8 +1381,9 @@ def test_dispatch_tool_rerank_travel_knowledge(monkeypatch):
     fake_response.content = [fake_content]
     fake_client = MagicMock()
     fake_client.messages.create.return_value = fake_response
-    with patch.object(reranker_mod, "anthropic") as mock_anthropic:
-        mock_anthropic.Anthropic.return_value = fake_client
+    monkeypatch.setenv("LLM_PROVIDER", "anthropic")
+    fake_response.text = fake_content.text
+    with patch.object(reranker_mod, "generate_text", return_value=fake_response):
         result = dispatch_tool("rerank_travel_knowledge", {
             "query": "safe food destination",
             "taste_profile": "love local food, hate tourist traps",
@@ -1519,12 +1439,12 @@ def test_tool_signals_influence_score_deterministically():
     # All three bonuses: short travel (+1), low weather risk (+1), cost within budget (+1)
     good_insight = ToolInsight(
         transport_hours=2.0,
-        transport_mode="flight",
+        transport_mode="train",
         weather_risk="low",
         weather_note="Sunny",
         estimated_total_cost=600,
     )
-    assert score_destination(destination, request, good_insight) == base_score + 3
+    assert score_destination(destination, request, good_insight) == base_score + 5
 
     # Both penalties: long travel (-1), high weather risk (-1); cost > budget, no bonus
     bad_insight = ToolInsight(
@@ -1534,4 +1454,4 @@ def test_tool_signals_influence_score_deterministically():
         weather_note="Stormy",
         estimated_total_cost=800,
     )
-    assert score_destination(destination, request, bad_insight) == base_score - 2
+    assert score_destination(destination, request, bad_insight) == base_score

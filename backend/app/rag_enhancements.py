@@ -1,12 +1,14 @@
 from __future__ import annotations
 
+from backend.app.trajectory import observed
+from backend.app.llm import generate_text
+
 import json
-import os
 from typing import Literal
 
 from pydantic import BaseModel, Field
 
-from backend.app.config import ANTHROPIC_MODEL, research_queries_per_round
+from backend.app.config import research_queries_per_round
 from backend.app.models import CandidateDestination, PlanningState
 from backend.app.reranker import llm_rerank
 
@@ -46,17 +48,13 @@ def _json_object(text: str) -> dict:
 
 
 def _ask_json(prompt: str, max_tokens: int = 700) -> dict:
-    import anthropic
-
-    client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-    response = client.messages.create(
-        model=ANTHROPIC_MODEL,
-        max_tokens=max_tokens,
-        messages=[{"role": "user", "content": prompt}],
-    )
-    return _json_object(response.content[0].text.strip())
+    response = generate_text(prompt, stage="rag_enhancements", max_tokens=max_tokens,
+                             prompt_version="rag_enhancements_v1")
+    return _json_object(response.text)
 
 
+
+@observed("research_controller", "workflow")
 def decide_research(
     state: PlanningState,
     searched_queries: list[str],
@@ -104,6 +102,7 @@ State:
     return decision
 
 
+@observed("candidate_reranker", "workflow")
 def rerank_candidates(
     candidates: list[CandidateDestination],
     state: PlanningState,
@@ -142,6 +141,7 @@ def rerank_candidates(
     return [by_name[name] for name in ordered_names]
 
 
+@observed("candidate_writer", "workflow")
 def write_candidate_copy(
     candidates: list[CandidateDestination],
     state: PlanningState,

@@ -1,3 +1,4 @@
+from threading import RLock
 from backend.app.models import TripPlan
 
 
@@ -9,10 +10,20 @@ class ConversationMemory:
         self.last_plan: TripPlan | None = None
         self.rejected_destinations: list[str] = []
         self.current_stage: str = "new"
+        self.response_language: str = "en"
+        self.last_run_id: str | None = None
+        self.pending_revision_message: str | None = None
+        self.pending_revision_fields: dict = {}
+        self.pending_fields: list[str] = []
+        self.lock = RLock()
 
     def context(self) -> dict:
         return {
             "conversation_id": self.conversation_id,
+            "response_language": self.response_language,
+            "pending_revision": self.pending_revision_message,
+            "missing_fields": self.pending_fields,
+            "plan_version": self.last_plan.version if self.last_plan else None,
             "current_stage": self.current_stage,
             "last_plan_exists": self.last_plan is not None,
             "last_plan_mode": self.last_plan.planner_mode if self.last_plan else "",
@@ -28,9 +39,11 @@ class ConversationMemory:
 
 
 _CONVERSATIONS: dict[str, ConversationMemory] = {}
+_CONVERSATION_LOCK = RLock()
 
 
 def get_conversation(conversation_id: str) -> ConversationMemory:
-    if conversation_id not in _CONVERSATIONS:
-        _CONVERSATIONS[conversation_id] = ConversationMemory(conversation_id)
-    return _CONVERSATIONS[conversation_id]
+    with _CONVERSATION_LOCK:
+        if conversation_id not in _CONVERSATIONS:
+            _CONVERSATIONS[conversation_id] = ConversationMemory(conversation_id)
+        return _CONVERSATIONS[conversation_id]

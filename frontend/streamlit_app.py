@@ -1,12 +1,23 @@
+import json
 import requests
 import streamlit as st
+
+from chat_client import request_chat
 
 
 CHAT_URL = "http://127.0.0.1:8000/chat"
 
 
 st.set_page_config(page_title="EuroTrip Agent", page_icon="EU")
+# Disable developer cache shortcuts for the user-facing chat page.
+st.set_option("client.toolbarMode", "viewer")
 st.title("EuroTrip Agent")
+
+
+def _slot_label(slot: str, plan: dict) -> str:
+    if plan.get("display_language", "en").startswith("zh"):
+        return {"morning": "上午", "afternoon": "下午", "evening": "晚上", "flexible": "灵活安排"}.get(slot, slot)
+    return slot.title()
 
 
 def _render_sources(dest: dict) -> None:
@@ -28,7 +39,7 @@ def render_fixed_itinerary(plan: dict) -> None:
     country = destination.get("country", "")
     cost = destination.get("estimated_cost")
 
-    st.caption(f"Planner mode: {plan.get('planner_mode', 'fixed_destination_itinerary')}")
+    st.caption(f"Planner mode: {plan.get('planner_mode', 'unknown')} · Plan version: {plan.get('version', 1)}")
     st.success(plan["final_recommendation"])
 
     if plan.get("explanation"):
@@ -47,7 +58,19 @@ def render_fixed_itinerary(plan: dict) -> None:
     st.subheader("Itinerary")
     for day in plan["itinerary"]:
         st.markdown(f"**Day {day['day']}**")
-        st.write(day["plan"])
+        if day.get("activities"):
+            for activity in day["activities"]:
+                st.markdown(f"**{activity.get('display_time_slot') or _slot_label(activity['time_slot'], plan)} · {activity['title']}**")
+                st.write(activity.get("description", ""))
+                for place in activity.get("places", []):
+                    st.caption(f"📍 {place['name']} · {place['latitude']:.5f}, {place['longitude']:.5f}")
+                    st.caption(place.get("attribution", ""))
+                if activity.get("place_resolution") in {"ambiguous", "not_found", "error"}:
+                    st.caption(activity.get("place_resolution_reason", "Place is unresolved."))
+                if activity.get("status") == "needs_verification":
+                    st.caption("Activity needs verification before booking.")
+        else:
+            st.write(day["plan"])
 
     if destination.get("pros") or destination.get("cons"):
         st.subheader("Evidence notes")
@@ -72,7 +95,7 @@ def render_fixed_itinerary(plan: dict) -> None:
 
 def render_plan(plan: dict) -> None:
     planner_mode = plan.get("planner_mode", "unknown")
-    if planner_mode.startswith("fixed_destination_itinerary"):
+    if planner_mode.startswith("fixed_destination_itinerary") or (planner_mode.startswith("unified_") and len(plan.get("ranked_destinations", [])) == 1):
         render_fixed_itinerary(plan)
         return
 
@@ -114,7 +137,7 @@ def render_plan(plan: dict) -> None:
             col_name, col_score, col_cost, col_home = st.columns([3, 1, 1, 1])
             col_name.markdown(f"### {dest['name']}, {dest['country']}")
             col_score.metric("Score", dest["score"])
-            col_cost.metric("Est. cost", f"€{dest['estimated_cost']}")
+            col_cost.metric("Est. cost", f"€{dest['estimated_cost']}" if dest.get("estimated_cost") is not None else "Unknown")
             if dest.get("estimated_cost_home") and dest.get("home_currency"):
                 col_home.metric(
                     dest["home_currency"],
@@ -132,7 +155,16 @@ def render_plan(plan: dict) -> None:
     st.subheader("Itinerary")
 
     for day in plan["itinerary"]:
-        st.markdown(f"**Day {day['day']} — {day['destination']}**  \n{day['plan']}")
+        st.markdown(f"**Day {day['day']} — {day['destination']}**")
+        if day.get("activities"):
+            for activity in day["activities"]:
+                st.markdown(f"**{activity.get('display_time_slot') or _slot_label(activity['time_slot'], plan)} · {activity['title']}**")
+                st.write(activity.get("description", ""))
+                for place in activity.get("places", []):
+                    st.caption(f"📍 {place['name']} · {place['latitude']:.5f}, {place['longitude']:.5f}")
+                    st.caption(place.get("attribution", ""))
+        else:
+            st.write(day["plan"])
 
     st.subheader("Risks & caveats")
     for risk in plan["risks"]:
@@ -196,24 +228,24 @@ if user_message:
         "message": user_message,
         "conversation_id": st.session_state.chat_conversation_id,
         "extracted_fields": st.session_state.chat_extracted_fields,
+        "expected_plan_version": (st.session_state.chat_latest_plan or {}).get("version"),
     }
     with st.status("Agent is working...", expanded=True) as status:
         st.write("Reading your message and extracting trip fields...")
         st.write("Routing the request to the right planning workflow...")
         st.write("Retrieving travel evidence and building a structured plan...")
         try:
-            response = requests.post(CHAT_URL, json=payload, timeout=90)
-            response.raise_for_status()
-            chat_response = response.json()
+            chat_response = request_chat(CHAT_URL, payload)
         except requests.RequestException as error:
             status.update(label="Agent request failed", state="error")
-            st.error(f"Could not reach the chat backend: {error}")
+            st.error(f"Chat request failed: {error}")
             st.stop()
         status.update(label="Agent finished", state="complete")
 
     st.session_state.chat_conversation_id = chat_response["conversation_id"]
     st.session_state.chat_extracted_fields = chat_response.get("extracted_fields", {})
     st.session_state.chat_latest_plan = chat_response.get("plan")
+    st.session_state.chat_latest_trajectory = chat_response.get("trajectory")
     st.session_state.chat_latest_trace = chat_response.get("trace", [])
     st.session_state.chat_latest_llm_usage = chat_response.get("llm_usage", [])
     assistant_message = chat_response["assistant_message"]
@@ -237,14 +269,27 @@ if st.session_state.chat_latest_trace:
 
 if st.session_state.chat_latest_llm_usage:
     with st.expander("LLM usage and cost"):
-        total_cost = sum(item.get("estimated_cost_usd", 0.0) for item in st.session_state.chat_latest_llm_usage)
+        total_cost = sum((item.get("estimated_cost_usd") or 0.0) for item in st.session_state.chat_latest_llm_usage)
         total_input = sum(item.get("input_tokens", 0) for item in st.session_state.chat_latest_llm_usage)
         total_output = sum(item.get("output_tokens", 0) for item in st.session_state.chat_latest_llm_usage)
         col_in, col_out, col_cost = st.columns(3)
         col_in.metric("Input tokens", total_input)
         col_out.metric("Output tokens", total_output)
-        col_cost.metric("Estimated cost", f"${total_cost:.6f}")
+        costs_known = all(item.get("estimated_cost_usd") is not None for item in st.session_state.chat_latest_llm_usage)
+        col_cost.metric("Estimated cost", f"${total_cost:.6f}" if costs_known else "Unavailable")
+        if any(item.get("estimated_cost_usd") is None for item in st.session_state.chat_latest_llm_usage):
+            st.caption("Some call costs are unavailable. Configure pricing for the selected model to estimate them.")
         st.json(st.session_state.chat_latest_llm_usage)
 
 if st.session_state.chat_latest_plan:
     render_plan(st.session_state.chat_latest_plan)
+
+
+if st.session_state.get("chat_latest_trajectory"):
+    trajectory = st.session_state.chat_latest_trajectory
+    st.download_button(
+        "Download trajectory JSON",
+        data=json.dumps(trajectory, ensure_ascii=False, indent=2),
+        file_name=f"{trajectory['run_id']}.traj.json",
+        mime="application/json",
+    )
